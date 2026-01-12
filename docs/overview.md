@@ -1,3 +1,8 @@
+# about docs
+Docs are genrally just - types, state, func singnatures. 
+Rarely you can have a little exposition
+and in docs like this (overview) we just explain.
+
 # go-sequence Overview
 
 MIDI sequencer/arranger. Not a DAW. A MIDI brain.

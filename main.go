@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"gitlab.com/gomidi/midi/v2"
+	_ "gitlab.com/gomidi/midi/v2/drivers/rtmididrv"
 )
 
 func main() {
-	ports := ListMIDIPorts()
+	ports := midi.GetOutPorts()
 	if len(ports) == 0 {
 		fmt.Println("No MIDI output ports found")
 		os.Exit(1)
@@ -18,17 +19,7 @@ func main() {
 
 	fmt.Println("Available MIDI output ports:")
 	for i, port := range ports {
-		fmt.Printf("  %d: %s\n", i, port)
-	}
-
-	// Auto-detect Launchpad for LED feedback - need "MIDI In" port, not "DAW In"
-	lpPortIndex := -1
-	for i, port := range ports {
-		lower := strings.ToLower(port)
-		if strings.Contains(lower, "launchpad") && strings.Contains(lower, "midi") {
-			lpPortIndex = i
-			break
-		}
+		fmt.Printf("  %d: %s\n", i, port.String())
 	}
 
 	// Get synth output port selection
@@ -46,62 +37,48 @@ func main() {
 		}
 	}
 
-	// Create sequencer
-	seq := NewSequencer()
+	// Create controller (Launchpad)
+	controller := NewController()
+	if err := controller.Open(); err != nil {
+		fmt.Printf("Warning: Failed to open Launchpad: %v\n", err)
+	}
+	defer controller.Close()
+
+	// Create manager
+	manager := NewManager(controller)
 	if synthPortIndex >= 0 {
-		if err := seq.OpenPort(synthPortIndex); err != nil {
+		if err := manager.OpenMIDI(synthPortIndex); err != nil {
 			fmt.Printf("Failed to open MIDI port: %v\n", err)
 		} else {
-			fmt.Printf("Synth output: %s\n", ports[synthPortIndex])
+			fmt.Printf("Synth output: %s\n", ports[synthPortIndex].String())
 		}
 	} else {
-		fmt.Println("No synth output (Launchpad LED only mode)")
+		fmt.Println("No synth output (LED only mode)")
 	}
-	defer seq.Close()
 
-	// Create Launchpad for LED feedback
-	lp := NewLaunchpad()
-	if lpPortIndex >= 0 {
-		if err := lp.Open(lpPortIndex); err != nil {
-			fmt.Printf("Failed to open Launchpad: %v\n", err)
-		} else {
-			fmt.Printf("Launchpad LED: %s\n", ports[lpPortIndex])
-		}
+	// Create devices
+	drum1 := NewDrumDevice(controller)
+	drum2 := NewDrumDevice(controller)
+
+	manager.AddDevice(drum1, 1) // external channel 1
+	manager.AddDevice(drum2, 2) // external channel 2
+
+	// Create session (clip launcher)
+	session := NewSessionDevice(controller, manager.devices)
+	manager.SetSession(session)
+
+	// Wire up controller input to manager
+	controller.OnPad = func(row, col int) {
+		manager.HandlePad(row, col)
 	}
-	defer lp.Close()
-
-	// Create Launchpad input (for pad presses)
-	lpInput := NewLaunchpadInput()
-	lpInputPortIndex := FindLaunchpadInputPort()
 
 	fmt.Println("\nStarting sequencer...")
 	fmt.Println("Put Launchpad in Programmer Mode: hold Session + bottom Scene button")
 	fmt.Println("")
 
 	// Create and run TUI
-	m := model{
-		seq:    seq,
-		lp:     lp,
-		cursor: 0,
-	}
-
-	// Initial Launchpad update
-	steps, playhead, playing, _ := seq.GetState()
-	lp.UpdateSequence(steps, playhead, playing)
-
+	m := newModel(manager)
 	p := tea.NewProgram(m, tea.WithAltScreen())
-
-	// Set up Launchpad input - pad presses toggle steps
-	if lpInputPortIndex >= 0 {
-		err := lpInput.Open(lpInputPortIndex, func(step int) {
-			// Send pad press to bubbletea as a message
-			p.Send(padPressMsg(step))
-		})
-		if err != nil {
-			fmt.Printf("Failed to open Launchpad input: %v\n", err)
-		}
-	}
-	defer lpInput.Close()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)

@@ -6,25 +6,19 @@ Clip launcher. Device 0. Controls other devices via direct method calls.
 
 ```go
 type SessionDevice struct {
-    controller  *Controller
-    devices     []Device  // references to all devices
-    numPatterns int
+    controller *Controller
+    devices    []Device
+    cursorRow  int
+    cursorCol  int
+    viewRows   int  // visible rows (default 8)
+    viewOffset int  // scroll position
 }
 ```
 
 ## Methods
 
 ```go
-func NewSessionDevice(controller *Controller, devices []Device, numPatterns int) *SessionDevice
-
-// Device interface
-func (s *SessionDevice) Tick(step int) []MIDIEvent  // returns nothing
-func (s *SessionDevice) QueuePattern(p int) (pattern, next int)
-func (s *SessionDevice) GetState() (pattern, next int)
-func (s *SessionDevice) HandleMIDI(event MIDIEvent)
-func (s *SessionDevice) View() string
-func (s *SessionDevice) HandleKey(key string)
-func (s *SessionDevice) HandlePad(row, col int)  // col=device, row=pattern
+func NewSessionDevice(controller *Controller, devices []Device) *SessionDevice
 ```
 
 ## Pattern Control
@@ -32,22 +26,25 @@ func (s *SessionDevice) HandlePad(row, col int)  // col=device, row=pattern
 Session calls device methods directly:
 ```go
 func (s *SessionDevice) HandlePad(row, col int) {
-    s.devices[col].QueuePattern(row)
+    patternRow := s.viewOffset + (7 - row)
+    s.devices[col].QueuePattern(patternRow)
 }
 
 func (s *SessionDevice) View() string {
     for i, dev := range s.devices {
         pattern, next := dev.GetState()
-        // render column i
+        mask := dev.ContentMask()
+        // render column i with content info
     }
 }
 ```
 
 ## UI
 
-Grid: columns = devices, rows = patterns.
+Grid: columns = devices, rows = patterns (scrollable, 128 total).
 
 LEDs:
 - Playing = green
 - Queued = yellow pulse
+- Has content = dim
 - Empty = off

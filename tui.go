@@ -2,40 +2,41 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 var (
-	// Orca-inspired minimal palette
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#555"))
 	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#fff"))
-	cursorStyle   = lipgloss.NewStyle().Background(lipgloss.Color("#444"))
-	playheadStyle = lipgloss.NewStyle().Reverse(true)
 	statusStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#888"))
+	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#0ff"))
 )
 
 type model struct {
-	seq      *Sequencer
-	lp       *Launchpad
-	cursor   int
+	manager  *Manager
 	quitting bool
 }
 
-type playheadMsg int
-type padPressMsg int
+type updateMsg struct{}
+type padPressMsg struct {
+	row, col int
+}
 
-func listenForPlayhead(seq *Sequencer) tea.Cmd {
+func newModel(manager *Manager) model {
+	return model{manager: manager}
+}
+
+func listenForUpdates(manager *Manager) tea.Cmd {
 	return func() tea.Msg {
-		playhead := <-seq.PlayheadChan
-		return playheadMsg(playhead)
+		<-manager.UpdateChan
+		return updateMsg{}
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return listenForPlayhead(m.seq)
+	return listenForUpdates(m.manager)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -44,71 +45,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
+			m.manager.Stop()
 			return m, tea.Quit
 
-		case "h", "left":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-
-		case "l", "right":
-			if m.cursor < 15 {
-				m.cursor++
-			}
-
-		case "j", "down":
-			m.seq.AdjustNote(m.cursor, -1)
-
-		case "k", "up":
-			m.seq.AdjustNote(m.cursor, 1)
-
-		case "J": // Shift+J = octave down
-			m.seq.AdjustNote(m.cursor, -12)
-
-		case "K": // Shift+K = octave up
-			m.seq.AdjustNote(m.cursor, 12)
-
-		case " ":
-			m.seq.ToggleStep(m.cursor)
-			// Update Launchpad
-			steps, playhead, playing, _ := m.seq.GetState()
-			m.lp.UpdateSequence(steps, playhead, playing)
-
 		case "p":
-			_, _, playing, _ := m.seq.GetState()
+			_, playing, _ := m.manager.GetState()
 			if playing {
-				m.seq.Stop()
+				m.manager.Stop()
 			} else {
-				m.seq.Play()
+				m.manager.Play()
 			}
-			// Update Launchpad
-			steps, playhead, playing, _ := m.seq.GetState()
-			m.lp.UpdateSequence(steps, playhead, playing)
 
 		case "+", "=":
-			_, _, _, tempo := m.seq.GetState()
-			m.seq.SetTempo(tempo + 5)
+			_, _, tempo := m.manager.GetState()
+			m.manager.SetTempo(tempo + 5)
 
 		case "-", "_":
-			_, _, _, tempo := m.seq.GetState()
-			m.seq.SetTempo(tempo - 5)
+			_, _, tempo := m.manager.GetState()
+			m.manager.SetTempo(tempo - 5)
+
+		case "0":
+			m.manager.FocusSession()
+
+		case "1", "2", "3", "4", "5", "6", "7", "8":
+			idx := int(msg.String()[0] - '1')
+			m.manager.FocusDevice(idx)
+
+		default:
+			// Pass to focused device
+			m.manager.HandleKey(msg.String())
 		}
 
-	case playheadMsg:
-		// Update Launchpad LEDs
-		steps, playhead, playing, _ := m.seq.GetState()
-		m.lp.UpdateSequence(steps, playhead, playing)
-		// Continue listening for playhead updates
-		return m, listenForPlayhead(m.seq)
+	case updateMsg:
+		return m, listenForUpdates(m.manager)
 
 	case padPressMsg:
-		// Launchpad pad pressed - toggle that step
-		step := int(msg)
-		m.seq.ToggleStep(step)
-		m.cursor = step // Move cursor to pressed pad
-		// Update Launchpad LEDs
-		steps, playhead, playing, _ := m.seq.GetState()
-		m.lp.UpdateSequence(steps, playhead, playing)
+		m.manager.HandlePad(msg.row, msg.col)
 	}
 
 	return m, nil
@@ -119,58 +91,20 @@ func (m model) View() string {
 		return ""
 	}
 
-	steps, playhead, playing, tempo := m.seq.GetState()
+	step, playing, tempo := m.manager.GetState()
 
-	// Build grid - Orca style, raw characters
-	var cells []string
-	for i, step := range steps {
-		char := "·"
-		if step.Active {
-			char = noteToChar(step.Note)
-		}
-
-		style := dimStyle
-		if step.Active {
-			style = activeStyle
-		}
-		if i == m.cursor {
-			style = style.Inherit(cursorStyle)
-		}
-		if i == playhead && playing {
-			style = playheadStyle
-		}
-
-		cells = append(cells, style.Render(char))
-	}
-	grid := strings.Join(cells, "")
-
-	// Status line
-	playState := "stop"
+	// Header
+	playState := "STOP"
 	if playing {
-		playState = "play"
+		playState = "PLAY"
 	}
+	header := headerStyle.Render(fmt.Sprintf("go-sequence  %s  %3dbpm  step:%02d", playState, tempo, step))
 
-	// Show note at cursor
-	cursorNote := steps[m.cursor].Note
-	noteStr := noteToName(cursorNote)
+	// Device view
+	deviceView := m.manager.View()
 
-	status := statusStyle.Render(fmt.Sprintf("%s %3dbpm  %s", playState, tempo, noteStr))
+	// Help
+	help := dimStyle.Render("0:session 1-8:device  h/l/j/k:nav  space:toggle  p:play  +/-:tempo  q:quit")
 
-	// Help line
-	help := dimStyle.Render("h/l:move  j/k:note  J/K:octave  space:toggle  p:play  +/-:tempo  q:quit")
-
-	return fmt.Sprintf("\n%s\n%s\n\n%s\n", grid, status, help)
-}
-
-// noteToChar converts MIDI note to a single character display
-func noteToChar(note uint8) string {
-	notes := []string{"C", "c", "D", "d", "E", "F", "f", "G", "g", "A", "a", "B"}
-	return notes[note%12]
-}
-
-// noteToName converts MIDI note to readable name (e.g., "C4", "F#3")
-func noteToName(note uint8) string {
-	names := []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
-	octave := int(note)/12 - 1
-	return fmt.Sprintf("%2s%d", names[note%12], octave)
+	return fmt.Sprintf("\n%s\n\n%s\n%s\n", header, deviceView, help)
 }

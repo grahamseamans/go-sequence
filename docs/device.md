@@ -5,6 +5,8 @@ All sequencer engines implement this interface.
 ## Interface
 
 ```go
+const NumPatterns = 128
+
 type Device interface {
     // Called by Manager every step
     Tick(step int) []MIDIEvent
@@ -12,14 +14,22 @@ type Device interface {
     // Pattern control (called by SessionDevice)
     QueuePattern(p int) (pattern, next int)  // queue pattern, returns current state
     GetState() (pattern, next int)           // read state without changing
+    ContentMask() []bool                     // which patterns have content
 
     // External MIDI input (keyboard for recording, etc.)
     HandleMIDI(event MIDIEvent)
 
-    // UI - device renders itself
+    // UI - device returns render data, Manager handles output
     View() string
+    RenderLEDs() []LEDMsg
     HandleKey(key string)
     HandlePad(row, col int)
+}
+
+type LEDMsg struct {
+    Row, Col int
+    Color    uint8
+    Channel  uint8  // 0=static, 2=pulse
 }
 ```
 
