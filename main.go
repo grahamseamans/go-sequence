@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"go-sequence/config"
 	"go-sequence/midi"
 	"go-sequence/sequencer"
 	"go-sequence/theme"
@@ -14,6 +14,13 @@ import (
 )
 
 func main() {
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Printf("Warning: could not load config: %v\n", err)
+		cfg = config.DefaultConfig()
+	}
+
 	// Load theme
 	palette := theme.MustLoadGPL("palettes/plasma.gpl")
 	th := theme.New(palette)
@@ -32,24 +39,32 @@ func main() {
 	session := sequencer.NewSessionDevice(manager.Devices())
 	manager.SetSession(session)
 
-	// Create MIDI device manager (handles hot-plug)
+	// Create MIDI device manager
 	deviceMgr := midi.NewDeviceManager()
 
-	// Start device manager in background
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go deviceMgr.Run(ctx)
-
+	// Try to connect to controller once on startup (with timeout, won't hang)
 	fmt.Println("go-sequence")
-	fmt.Println("Connect MIDI devices any time - they'll be detected automatically")
+	if err := deviceMgr.Connect(cfg); err != nil {
+		fmt.Printf("No controller: %v\n", err)
+		fmt.Println("Press 'r' in the app to scan for devices")
+	} else {
+		ctrl := deviceMgr.GetController()
+		if ctrl != nil {
+			fmt.Printf("Connected: %s\n", ctrl.ID())
+			manager.SetController(ctrl)
+		}
+	}
 	fmt.Println("")
 
 	// Create and run TUI
-	m := tui.NewModel(manager, deviceMgr, th)
+	m := tui.NewModel(manager, deviceMgr, cfg, th)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Cleanup
+	deviceMgr.Disconnect()
 }

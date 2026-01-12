@@ -2,9 +2,12 @@ package midi
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"go-sequence/config"
 
 	gomidi "gitlab.com/gomidi/midi/v2"
 	"gitlab.com/gomidi/midi/v2/drivers"
@@ -16,6 +19,7 @@ type DeviceEvent struct {
 	Type       DeviceEventType
 	Controller Controller
 	ID         string
+	Error      error
 }
 
 type DeviceEventType int
@@ -23,177 +27,199 @@ type DeviceEventType int
 const (
 	DeviceConnected DeviceEventType = iota
 	DeviceDisconnected
+	DeviceError
 )
 
-// DeviceManager handles hot-plug detection of MIDI controllers
+// DeviceManager handles MIDI controller connections (no polling - user-initiated only)
 type DeviceManager struct {
-	controllers map[string]Controller
-	mu          sync.RWMutex
-	events      chan DeviceEvent
-	pollRate    time.Duration
+	controller Controller
+	mu         sync.RWMutex
+	timeout    time.Duration
 }
 
 // NewDeviceManager creates a new device manager
 func NewDeviceManager() *DeviceManager {
 	return &DeviceManager{
-		controllers: make(map[string]Controller),
-		events:      make(chan DeviceEvent, 16),
-		pollRate:    time.Second,
+		timeout: 5 * time.Second,
 	}
 }
 
-// Events returns a channel of device connect/disconnect events
-func (dm *DeviceManager) Events() <-chan DeviceEvent {
-	return dm.events
-}
-
-// Controllers returns a snapshot of connected controllers
-func (dm *DeviceManager) Controllers() map[string]Controller {
+// GetController returns the currently connected controller (or nil)
+func (dm *DeviceManager) GetController() Controller {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
-	copy := make(map[string]Controller, len(dm.controllers))
-	for k, v := range dm.controllers {
-		copy[k] = v
-	}
-	return copy
+	return dm.controller
 }
 
-// GetLaunchpad returns the first connected Launchpad (or nil)
-func (dm *DeviceManager) GetLaunchpad() Controller {
-	dm.mu.RLock()
-	defer dm.mu.RUnlock()
-	for _, c := range dm.controllers {
-		if c.Type() == ControllerLaunchpad {
-			return c
-		}
-	}
-	return nil
-}
+// Connect attempts to connect to a controller (with timeout)
+// This is called on startup and when user requests a rescan
+func (dm *DeviceManager) Connect(cfg *config.Config) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
 
-// Run starts the polling loop (blocking - run in goroutine)
-func (dm *DeviceManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(dm.pollRate)
-	defer ticker.Stop()
-
-	// Initial scan
-	dm.scan()
-
-	for {
-		select {
-		case <-ctx.Done():
-			dm.closeAll()
-			close(dm.events)
-			return
-		case <-ticker.C:
-			dm.scan()
-		}
-	}
-}
-
-func (dm *DeviceManager) scan() {
-	// Get current MIDI ports with timeout (CoreMIDI can hang)
-	type portsResult struct {
-		inPorts  []drivers.In
-		outPorts []drivers.Out
-		err      error
+	// Close existing controller if any
+	if dm.controller != nil {
+		dm.controller.Close()
+		dm.controller = nil
 	}
 
-	ch := make(chan portsResult, 1)
+	// Timeout wrapper for all CoreMIDI operations
+	ctx, cancel := context.WithTimeout(context.Background(), dm.timeout)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	var newController Controller
+
 	go func() {
-		inPorts := gomidi.GetInPorts()
-		outPorts := gomidi.GetOutPorts()
-		ch <- portsResult{inPorts: inPorts, outPorts: outPorts}
+		ctrl, err := dm.tryConnect(cfg)
+		if err == nil {
+			newController = ctrl
+		}
+		resultCh <- err
 	}()
 
-	// Wait for result or timeout
-	var inPorts []drivers.In
-	var outPorts []drivers.Out
-
 	select {
-	case result := <-ch:
-		inPorts = result.inPorts
-		outPorts = result.outPorts
-	case <-time.After(3 * time.Second):
-		// CoreMIDI is hung - skip this scan
-		// User needs to run: sudo killall coreaudiod midiserver
-		return
+	case err := <-resultCh:
+		if err == nil {
+			dm.controller = newController
+		}
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("MIDI timeout - system may be busy. Try: sudo killall coreaudiod midiserver")
+	}
+}
+
+// tryConnect attempts to find and connect to a controller
+func (dm *DeviceManager) tryConnect(cfg *config.Config) (Controller, error) {
+	// Get ports (single enumeration, not a loop)
+	inPorts := gomidi.GetInPorts()
+	outPorts := gomidi.GetOutPorts()
+
+	if len(inPorts) == 0 {
+		return nil, fmt.Errorf("no MIDI input ports found")
 	}
 
-	// Build map of what we see now
-	seenIDs := make(map[string]bool)
+	// Try auto-connect controllers from config
+	for _, ctrlCfg := range cfg.AutoConnectControllers() {
+		inPort := findPortByName(inPorts, ctrlCfg.PortName)
+		if inPort == nil {
+			continue
+		}
 
-	// Look for Launchpads
-	for i, inPort := range inPorts {
+		// Find matching output port
+		outName := strings.Replace(ctrlCfg.PortName, "In", "Out", 1)
+		outPort := findPortByName(outPorts, outName)
+
+		ctrl, err := dm.createController(ctrlCfg.Type, inPort, outPort)
+		if err == nil {
+			return ctrl, nil
+		}
+	}
+
+	// Fallback: try to find any Launchpad
+	for _, inPort := range inPorts {
 		name := strings.ToLower(inPort.String())
-		if isLaunchpad(name) {
-			id := inPort.String()
-			seenIDs[id] = true
+		if strings.Contains(name, "launchpad") && strings.Contains(name, "midi") {
+			// Find matching output
+			outPort := findPortByName(outPorts, inPort.String())
 
-			dm.mu.RLock()
-			_, exists := dm.controllers[id]
-			dm.mu.RUnlock()
+			// Detect type from name
+			ctrlType := detectControllerType(inPort.String())
 
-			if !exists {
-				// Find matching output port
-				var outPort drivers.Out
-				for j, op := range outPorts {
-					if strings.ToLower(op.String()) == name {
-						outPort = outPorts[j]
-						break
-					}
-				}
-
-				// Try to create controller
-				lp, err := NewLaunchpadController(id, inPorts[i], outPort)
-				if err != nil {
-					continue
-				}
-
-				dm.mu.Lock()
-				dm.controllers[id] = lp
-				dm.mu.Unlock()
-
-				dm.events <- DeviceEvent{
-					Type:       DeviceConnected,
-					Controller: lp,
-					ID:         id,
-				}
+			ctrl, err := dm.createController(ctrlType, inPort, outPort)
+			if err == nil {
+				return ctrl, nil
 			}
 		}
 	}
 
-	// TODO: Detect keyboards (non-Launchpad MIDI inputs)
-
-	// Check for disconnects
-	dm.mu.Lock()
-	var toRemove []string
-	for id := range dm.controllers {
-		if !seenIDs[id] {
-			toRemove = append(toRemove, id)
-		}
-	}
-	for _, id := range toRemove {
-		c := dm.controllers[id]
-		c.Close()
-		delete(dm.controllers, id)
-		dm.events <- DeviceEvent{
-			Type: DeviceDisconnected,
-			ID:   id,
-		}
-	}
-	dm.mu.Unlock()
+	return nil, fmt.Errorf("no compatible controller found")
 }
 
-func (dm *DeviceManager) closeAll() {
+// createController creates the appropriate controller based on type
+func (dm *DeviceManager) createController(ctrlType config.ControllerType, inPort drivers.In, outPort drivers.Out) (Controller, error) {
+	switch ctrlType {
+	case config.ControllerLaunchpadX:
+		return NewLaunchpadController(inPort.String(), inPort, outPort)
+	case config.ControllerLaunchpadMini:
+		return NewLaunchpadController(inPort.String(), inPort, outPort) // Same for now
+	case config.ControllerLaunchpadPro:
+		return NewLaunchpadController(inPort.String(), inPort, outPort) // Same for now
+	case config.ControllerKeyboard:
+		return NewKeyboardController(inPort.String(), inPort)
+	default:
+		return nil, fmt.Errorf("unknown controller type: %s", ctrlType)
+	}
+}
+
+// Disconnect closes the current controller
+func (dm *DeviceManager) Disconnect() {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
-	for _, c := range dm.controllers {
-		c.Close()
+
+	if dm.controller != nil {
+		dm.controller.Close()
+		dm.controller = nil
 	}
-	dm.controllers = make(map[string]Controller)
 }
 
-func isLaunchpad(name string) bool {
-	name = strings.ToLower(name)
-	return strings.Contains(name, "launchpad") && strings.Contains(name, "midi")
+// ScanPorts returns available MIDI ports (with timeout)
+func (dm *DeviceManager) ScanPorts() ([]string, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dm.timeout)
+	defer cancel()
+
+	type result struct {
+		inNames  []string
+		outNames []string
+		err      error
+	}
+
+	ch := make(chan result, 1)
+	go func() {
+		inPorts := gomidi.GetInPorts()
+		outPorts := gomidi.GetOutPorts()
+
+		var inNames, outNames []string
+		for _, p := range inPorts {
+			inNames = append(inNames, p.String())
+		}
+		for _, p := range outPorts {
+			outNames = append(outNames, p.String())
+		}
+		ch <- result{inNames: inNames, outNames: outNames}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.inNames, r.outNames, r.err
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("MIDI scan timeout")
+	}
+}
+
+// Helper functions
+
+func findPortByName[T interface{ String() string }](ports []T, name string) T {
+	nameLower := strings.ToLower(name)
+	for _, p := range ports {
+		if strings.Contains(strings.ToLower(p.String()), nameLower) {
+			return p
+		}
+	}
+	var zero T
+	return zero
+}
+
+func detectControllerType(portName string) config.ControllerType {
+	name := strings.ToLower(portName)
+	switch {
+	case strings.Contains(name, "launchpad x"):
+		return config.ControllerLaunchpadX
+	case strings.Contains(name, "launchpad mini"):
+		return config.ControllerLaunchpadMini
+	case strings.Contains(name, "launchpad pro"):
+		return config.ControllerLaunchpadPro
+	default:
+		return config.ControllerLaunchpadX // Default assumption
+	}
 }

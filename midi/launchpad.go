@@ -50,11 +50,25 @@ func NewLaunchpadController(id string, inPort drivers.In, outPort drivers.Out) (
 	if inPort != nil {
 		stop, err := gomidi.ListenTo(inPort, func(msg gomidi.Message, timestampms int32) {
 			var channel, note, velocity uint8
+			var cc, value uint8
+
+			// Handle note messages (8x8 grid + side buttons)
 			if msg.GetNoteOn(&channel, &note, &velocity) && velocity > 0 {
 				row, col := noteToRowCol(note)
 				if row >= 0 {
 					select {
 					case lp.padChan <- PadEvent{Row: row, Col: col, Velocity: velocity}:
+					default:
+					}
+				}
+			}
+
+			// Handle CC messages (top row buttons CC 91-98)
+			if msg.GetControlChange(&channel, &cc, &value) && value > 0 {
+				row, col := ccToRowCol(cc)
+				if row >= 0 {
+					select {
+					case lp.padChan <- PadEvent{Row: row, Col: col, Velocity: value}:
 					default:
 					}
 				}
@@ -100,10 +114,19 @@ func (lp *LaunchpadController) ClearLEDs() error {
 	if lp.send == nil {
 		return nil
 	}
-	for row := 0; row < 8; row++ {
-		for col := 0; col < 8; col++ {
+	// Clear 8x8 main grid
+	for row := range 8 {
+		for col := range 8 {
 			lp.SetLED(row, col, ColorOff, 0)
 		}
+	}
+	// Clear right side column (col 8)
+	for row := range 8 {
+		lp.SetLED(row, 8, ColorOff, 0)
+	}
+	// Clear top row (row 8)
+	for col := range 8 {
+		lp.SetLED(8, col, ColorOff, 0)
 	}
 	return nil
 }
@@ -121,18 +144,36 @@ func (lp *LaunchpadController) Close() error {
 }
 
 // Launchpad X note mapping
-// Row 0 (bottom) = notes 11-18
-// Row 7 (top) = notes 81-88
+// 8x8 Grid:  Row 0 (bottom) = notes 11-18, Row 7 = notes 81-88
+// Side col:  Col 8 (right side scene buttons) = notes 19, 29, 39, 49, 59, 69, 79, 89
+// Top row:   Row 8 (top control row) = CC 91-98 (handled via CC messages)
 
 func rowColToNote(row, col int) uint8 {
+	// Top row uses CC, but for LED control we use notes 91-98
+	if row == 8 {
+		return uint8(91 + col)
+	}
 	return uint8((row+1)*10 + col + 1)
 }
 
 func noteToRowCol(note uint8) (row, col int) {
+	// Top row notes (91-98)
+	if note >= 91 && note <= 98 {
+		return 8, int(note - 91)
+	}
 	row = int(note/10) - 1
 	col = int(note%10) - 1
-	if row < 0 || row > 7 || col < 0 || col > 7 {
+	// Accept 8x8 grid (rows 0-7, cols 0-7) plus side column (col 8)
+	if row < 0 || row > 7 || col < 0 || col > 8 {
 		return -1, -1
 	}
 	return row, col
+}
+
+// ccToRowCol converts CC messages to row/col (for top row buttons)
+func ccToRowCol(cc uint8) (row, col int) {
+	if cc >= 91 && cc <= 98 {
+		return 8, int(cc - 91)
+	}
+	return -1, -1
 }
