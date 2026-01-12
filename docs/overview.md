@@ -59,7 +59,7 @@ Devices are self-contained sequencer engines. Each device:
 
 - Stores its own patterns
 - Handles its own playback logic
-- Renders its own UI (TUI + Launchpad LEDs)
+- Returns render data (TUI string + LED state)
 - Handles its own input (keyboard + pads)
 - Outputs MIDI events (with internal channel)
 
@@ -74,8 +74,8 @@ See individual device docs for details:
 Manager tracks which device is focused. Focused device:
 - Gets keyboard input
 - Gets Launchpad pad input
-- Shows its View() in TUI
-- Controls Launchpad LEDs
+- View() shown in TUI
+- RenderLEDs() sent to Launchpad
 
 SessionDevice is focused by default (clip launcher view). Switch focus to edit a specific device.
 

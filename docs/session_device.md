@@ -6,7 +6,6 @@ Clip launcher. Device 0. Controls other devices via direct method calls.
 
 ```go
 type SessionDevice struct {
-    controller *Controller
     devices    []Device
     cursorRow  int
     cursorCol  int
@@ -18,7 +17,7 @@ type SessionDevice struct {
 ## Methods
 
 ```go
-func NewSessionDevice(controller *Controller, devices []Device) *SessionDevice
+func NewSessionDevice(devices []Device) *SessionDevice
 ```
 
 ## Pattern Control

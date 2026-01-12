@@ -23,7 +23,7 @@ type Manager struct {
 
 ## Tick Loop
 
-Called at tempo. Ticks all devices, collects MIDI, sends to hardware.
+Called at tempo. Ticks all devices, collects MIDI, sends to hardware, updates LEDs.
 
 ```go
 func (m *Manager) tick() {
@@ -42,12 +42,17 @@ func (m *Manager) tick() {
         events[i].Channel = m.channelMap[events[i].Channel]
     }
 
-    // 3. Send (tight loop, all at once)
+    // 3. Send MIDI (tight loop, all at once)
     for _, e := range events {
         m.midiOut.Send(e)
     }
 
-    // 4. Advance step
+    // 4. Update LEDs on focused device
+    for _, led := range m.focused.RenderLEDs() {
+        m.controller.SetPad(led.Row, led.Col, led.Color, led.Channel)
+    }
+
+    // 5. Advance step
     m.step = (m.step + 1) % 16
 }
 ```

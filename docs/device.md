@@ -67,9 +67,10 @@ For external MIDI input (keyboard recording, etc.). Not used by SessionDevice.
 
 ## UI Methods
 
-Device renders itself:
+Device returns render data:
 - `View()` - TUI string
-- `HandleKey(key)` - keyboard
-- `HandlePad(row, col)` - Launchpad
+- `RenderLEDs()` - Launchpad LED state
+- `HandleKey(key)` - keyboard input
+- `HandlePad(row, col)` - Launchpad pad input
 
-Device holds Controller reference, updates LEDs directly.
+Manager owns Controller, sends LED data to hardware.
