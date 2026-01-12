@@ -1,0 +1,65 @@
+# Device Interface
+
+All sequencer engines implement this interface.
+
+## Interface
+
+```go
+type Device interface {
+    // Called by Manager every step
+    Tick(step int) []MIDIEvent
+
+    // Pattern control (called by SessionDevice)
+    QueuePattern(p int) (pattern, next int)  // queue pattern, returns current state
+    GetState() (pattern, next int)           // read state without changing
+
+    // External MIDI input (keyboard for recording, etc.)
+    HandleMIDI(event MIDIEvent)
+
+    // UI - device renders itself
+    View() string
+    HandleKey(key string)
+    HandlePad(row, col int)
+}
+```
+
+## Tick(step int) []MIDIEvent
+
+Called by Manager every step.
+
+Returns MIDI events to send. Channel is set by Manager.
+
+Device handles pattern switching at its own loop boundary:
+```go
+func (d *SomeDevice) Tick(step int) []MIDIEvent {
+    if step == 0 {
+        d.pattern = d.next
+    }
+    // ... generate events for current step
+}
+```
+
+## Pattern Looping
+
+- `next` defaults to `pattern` (loops forever)
+- At loop boundary, `pattern = next`
+- Call `QueuePattern(n)` to change what plays next
+
+## QueuePattern / GetState
+
+SessionDevice uses these directly (not MIDI):
+- `QueuePattern(3)` → queues pattern 3, returns `(currentPattern, 3)`
+- `GetState()` → returns `(pattern, next)` for display
+
+## HandleMIDI
+
+For external MIDI input (keyboard recording, etc.). Not used by SessionDevice.
+
+## UI Methods
+
+Device renders itself:
+- `View()` - TUI string
+- `HandleKey(key)` - keyboard
+- `HandlePad(row, col)` - Launchpad
+
+Device holds Controller reference, updates LEDs directly.
