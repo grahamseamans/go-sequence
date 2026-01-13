@@ -1,6 +1,7 @@
 package sequencer
 
 import (
+	"runtime"
 	"sync"
 	"time"
 
@@ -136,73 +137,81 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) tickLoop() {
+	runtime.LockOSThread() // Pin to OS thread for consistent scheduling
+	defer runtime.UnlockOSThread()
+
+	// Capture tempo at start (changes apply on next play)
+	m.mu.Lock()
+	tempo := m.tempo
+	m.mu.Unlock()
+
+	// Calculate step duration (16th notes)
+	stepDuration := time.Duration(float64(time.Second) * 60.0 / float64(tempo) / 4.0)
+
+	ticker := time.NewTicker(stepDuration)
+	defer ticker.Stop()
+
 	for {
-		m.mu.Lock()
-		if !m.playing {
-			m.mu.Unlock()
-			return
-		}
-		tempo := m.tempo
-		step := m.step
-		m.mu.Unlock()
-
-		// Calculate step duration (16th notes)
-		stepDuration := time.Duration(float64(time.Second) * 60.0 / float64(tempo) / 4.0)
-
-		// 1. Tick all tracks → collect MIDI events with track's channel
-		var events []midi.Event
-		for _, track := range m.tracks {
-			if track.Device == nil || track.Muted {
-				continue
-			}
-			devEvents := track.Device.Tick(step)
-			for _, e := range devEvents {
-				e.Channel = track.Channel // use track's MIDI channel
-				events = append(events, e)
-			}
-		}
-
-		// 2. Send MIDI events (channel already set from track)
-		if m.send != nil {
-			for _, e := range events {
-				switch e.Type {
-				case midi.NoteOn:
-					m.send(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
-					// Schedule note off
-					go func(ch, note uint8) {
-						time.Sleep(stepDuration * 80 / 100)
-						m.send(gomidi.NoteOff(ch, note))
-					}(e.Channel, e.Note)
-				case midi.NoteOff:
-					m.send(gomidi.NoteOff(e.Channel, e.Note))
-				}
-			}
-		}
-
-		// 3. Update LEDs on focused device
-		if m.focused != nil && m.controller != nil {
-			for _, led := range m.focused.RenderLEDs() {
-				m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
-			}
-		}
-
-		// 4. Notify TUI
-		select {
-		case m.UpdateChan <- struct{}{}:
-		default:
-		}
-
-		// 5. Wait for next step or stop
 		select {
 		case <-m.stopChan:
 			return
-		case <-time.After(stepDuration):
-		}
+		case <-ticker.C:
+			m.mu.Lock()
+			if !m.playing {
+				m.mu.Unlock()
+				return
+			}
+			step := m.step
+			m.mu.Unlock()
 
-		// 6. Advance step
-		m.mu.Lock()
-		m.step = (m.step + 1) % 16
-		m.mu.Unlock()
+			// 1. Tick all tracks → collect MIDI events with track's channel
+			var events []midi.Event
+			for _, track := range m.tracks {
+				if track.Device == nil || track.Muted {
+					continue
+				}
+				devEvents := track.Device.Tick(step)
+				for _, e := range devEvents {
+					e.Channel = track.Channel // use track's MIDI channel
+					events = append(events, e)
+				}
+			}
+
+			// 2. Send MIDI events (channel already set from track)
+			if m.send != nil {
+				for _, e := range events {
+					switch e.Type {
+					case midi.NoteOn:
+						m.send(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
+						// Schedule note off
+						go func(ch, note uint8) {
+							time.Sleep(stepDuration * 80 / 100)
+							m.send(gomidi.NoteOff(ch, note))
+						}(e.Channel, e.Note)
+					case midi.NoteOff:
+						m.send(gomidi.NoteOff(e.Channel, e.Note))
+					}
+				}
+			}
+
+			// 3. Update LEDs on focused device
+			if m.focused != nil && m.controller != nil {
+				for _, led := range m.focused.RenderLEDs() {
+					m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
+				}
+			}
+
+			// 4. Notify TUI
+			select {
+			case m.UpdateChan <- struct{}{}:
+			default:
+			}
+
+			// 5. Advance step
+			m.mu.Lock()
+			m.step = (m.step + 1) % 16
+			m.mu.Unlock()
+		}
 	}
 }
 

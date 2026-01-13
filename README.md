@@ -9,7 +9,7 @@ Working: Drum sequencer (16 sounds, 32 steps, variable length), piano roll (note
 ## Feature Checklist
 
 ### Universal
-- [x] Pattern selection per device (`,`/`.` to switch editing pattern)
+- [x] Pattern selection per device (`<`/`>` to switch editing pattern)
 - [x] Device reports pattern content (empty vs has data) for clip launcher display
 - [ ] Undo/redo
 - [ ] Multiple Launchpads (independent navigation)
@@ -93,7 +93,7 @@ The piano roll is for **editing notes you play in** via MIDI keyboard - not for 
 - `space` - toggle step
 - `[`/`]` - track length -/+
 - `c` - clear track
-- `,`/`.` - previous/next pattern (editing)
+- `<`/`>` - previous/next pattern (editing)
 
 ### Piano Roll
 **Select notes**
