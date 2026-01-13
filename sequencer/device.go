@@ -7,6 +7,16 @@ import (
 
 const NumPatterns = 128
 
+// DeviceType identifies what kind of sequencer device
+type DeviceType string
+
+const (
+	DeviceTypeNone     DeviceType = ""
+	DeviceTypeDrum     DeviceType = "Drum"
+	DeviceTypePiano    DeviceType = "Piano"
+	// Future: DeviceTypeMetropolix, DeviceTypeEuclidean, etc.
+)
+
 // Device is a musical device that can produce MIDI events
 type Device interface {
 	// Called by Manager every step
@@ -33,6 +43,6 @@ type Device interface {
 // LEDState describes the state of a single LED
 type LEDState struct {
 	Row, Col int
-	Color    uint8
-	Channel  uint8 // 0=static, 2=pulse
+	Color    [3]uint8 // RGB color - controller maps to its palette
+	Channel  uint8    // 0=static, 2=pulse
 }

@@ -39,6 +39,7 @@ type DrumDevice struct {
 	next     int // queued (defaults to pattern)
 	step     int // global step counter
 	selected int // which track (0-15) we're editing
+	editing  int // which pattern we're editing (independent of playing)
 
 	// UI state
 	cursor int // step cursor for keyboard nav
@@ -51,6 +52,7 @@ func NewDrumDevice() *DrumDevice {
 		next:     0,
 		step:     0,
 		selected: 0,
+		editing:  0,
 		cursor:   0,
 	}
 
@@ -98,30 +100,33 @@ func NewDrumDevice() *DrumDevice {
 // Device interface implementation
 
 func (d *DrumDevice) Tick(step int) []midi.Event {
-	// Pattern switch at own loop boundary
-	if d.step == 0 {
-		d.pattern = d.next
-	}
-
 	pat := d.patterns[d.pattern]
 	masterLen := pat.MasterLength()
+
+	// Pattern switch at master length boundary
+	if d.step%masterLen == 0 {
+		d.pattern = d.next
+		pat = d.patterns[d.pattern] // refresh in case it changed
+	}
 
 	var events []midi.Event
 	for i := 0; i < 16; i++ {
 		track := &pat.Tracks[i]
-		if d.step < track.Length {
-			s := track.Steps[d.step]
-			if s.Active {
-				events = append(events, midi.Event{
-					Type:     midi.NoteOn,
-					Note:     track.Note,
-					Velocity: s.Velocity,
-				})
-			}
+		// Each track loops at its own length (polymeters!)
+		trackStep := d.step % track.Length
+		s := track.Steps[trackStep]
+		if s.Active {
+			events = append(events, midi.Event{
+				Type:     midi.NoteOn,
+				Note:     track.Note,
+				Velocity: s.Velocity,
+			})
 		}
 	}
 
-	d.step = (d.step + 1) % masterLen
+	// Keep counting - don't reset at masterLen (breaks polymeters)
+	// Wrap at large value to prevent overflow
+	d.step = (d.step + 1) % 65536
 	return events
 }
 
@@ -159,17 +164,22 @@ func (d *DrumDevice) HandleMIDI(event midi.Event) {
 }
 
 func (d *DrumDevice) View() string {
-	pat := d.patterns[d.pattern]
+	pat := d.patterns[d.editing]
 
-	// Header
-	out := fmt.Sprintf("DRUM pat:%d step:%d\n", d.pattern, d.step)
-
-	trackNames := []string{"KCK", "SNR", "CHH", "OHH", "LT ", "MT ", "HT ", "CRS", "RID", "CLP", "COW", "CLV", "TMB", "CBS", "MRC", "RIM"}
+	// Header - show editing vs playing
+	playInfo := ""
+	if d.editing != d.pattern {
+		playInfo = fmt.Sprintf(" (playing:%d)", d.pattern)
+	}
+	selectedTrack := &pat.Tracks[d.selected]
+	selectedStep := d.step % selectedTrack.Length
+	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Track %d\n\n", d.editing+1, playInfo, selectedStep+1, selectedTrack.Length, d.selected+1)
 
 	// 16x32 grid - single char per cell
 	for t := 0; t < 16; t++ {
 		track := &pat.Tracks[t]
-		out += trackNames[t] + " "
+		trackStep := d.step % track.Length // each track has its own playhead
+		out += fmt.Sprintf("%2d ", t+1)
 
 		for s := 0; s < 32; s++ {
 			isCursor := t == d.selected && s == d.cursor
@@ -181,7 +191,7 @@ func (d *DrumDevice) View() string {
 				} else {
 					char = "-" // beyond
 				}
-			} else if s == d.step {
+			} else if s == trackStep {
 				if isCursor {
 					char = "▷" // cursor on playhead
 				} else {
@@ -206,29 +216,66 @@ func (d *DrumDevice) View() string {
 		out += "\n"
 	}
 
+	// Key help
+	out += "\n"
+	out += widgets.RenderKeyHelp([]widgets.KeySection{
+		{Keys: []widgets.KeyBinding{
+			{Key: "h / l", Desc: "move cursor left/right through steps"},
+			{Key: "j / k", Desc: "select track up/down"},
+			{Key: "space", Desc: "toggle step on/off"},
+			{Key: "[ / ]", Desc: "shorten/lengthen track"},
+			{Key: "c", Desc: "clear current track"},
+			{Key: "< / >", Desc: "previous/next pattern"},
+		}},
+	})
+
+	// Launchpad
+	out += "\n\n"
+	out += widgets.RenderLaunchpad(d.HelpLayout())
+	out += "\n"
+	out += widgets.RenderLegend([]widgets.Zone{
+		{Name: "Steps", Color: [3]uint8{234, 73, 116}, Desc: "tap to toggle steps 1-32"},
+		{Name: "Track", Color: [3]uint8{148, 18, 126}, Desc: "tap to select track 1-16"},
+		{Name: "Commands", Color: [3]uint8{253, 157, 110}, Desc: "clear, nudge, length, velocity"},
+		{Name: "Scene", Color: [3]uint8{71, 13, 121}, Desc: "launch scenes"},
+	})
+
 	return out
 }
 
 func (d *DrumDevice) RenderLEDs() []LEDState {
 	var leds []LEDState
-	pat := d.patterns[d.pattern]
+	pat := d.patterns[d.editing]
 	track := &pat.Tracks[d.selected]
 
+	// Colors - TODO: move to theme
+	stepsColor := [3]uint8{234, 73, 116}        // pink - active step
+	stepsEmpty := [3]uint8{80, 30, 50}          // dim pink - empty but in bounds
+	trackHasContent := [3]uint8{148, 18, 126}   // purple - track has notes
+	trackEmpty := [3]uint8{40, 10, 30}          // dim - empty track
+	trackSelected := [3]uint8{255, 255, 255}    // white - selected track
+	commandsColor := [3]uint8{253, 157, 110}    // orange
+	playheadColor := [3]uint8{255, 255, 255}    // white
+	offColor := [3]uint8{0, 0, 0}               // black - beyond track length
+
 	// Top 4 rows (rows 4-7): steps for selected track
+	trackStep := d.step % track.Length // polymeter: each track has its own position
 	for stepIdx := 0; stepIdx < 32; stepIdx++ {
 		row := 7 - (stepIdx / 8)
 		col := stepIdx % 8
 
-		var color uint8 = midi.ColorOff
-		var channel uint8 = 0
+		var color [3]uint8 = offColor
+		var channel uint8 = midi.ChannelStatic
 
 		if stepIdx >= track.Length {
-			color = midi.ColorOff
-		} else if stepIdx == d.step {
-			color = midi.ColorYellow
-			channel = 2 // pulsing
+			color = offColor
+		} else if stepIdx == trackStep {
+			color = playheadColor
+			channel = midi.ChannelPulse
 		} else if track.Steps[stepIdx].Active {
-			color = midi.ColorGreen
+			color = stepsColor
+		} else {
+			color = stepsEmpty
 		}
 
 		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: channel})
@@ -247,23 +294,22 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 			}
 		}
 
-		var color uint8 = midi.ColorOff
-		var channel uint8 = 0
-
+		var color [3]uint8
 		if t == d.selected {
-			color = midi.ColorGreen
-			channel = 0
+			color = trackSelected // white
 		} else if hasContent {
-			color = midi.ColorDim
+			color = trackHasContent // purple
+		} else {
+			color = trackEmpty // dim
 		}
 
-		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: channel})
+		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: midi.ChannelStatic})
 	}
 
-	// Bottom-right 4x4: commands (dim placeholders)
+	// Bottom-right 4x4: commands
 	for row := 0; row < 4; row++ {
 		for col := 4; col < 8; col++ {
-			leds = append(leds, LEDState{Row: row, Col: col, Color: midi.ColorOff, Channel: 0})
+			leds = append(leds, LEDState{Row: row, Col: col, Color: commandsColor, Channel: midi.ChannelStatic})
 		}
 	}
 
@@ -271,7 +317,7 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 }
 
 func (d *DrumDevice) HandleKey(key string) {
-	pat := d.patterns[d.pattern]
+	pat := d.patterns[d.editing]
 	track := &pat.Tracks[d.selected]
 
 	switch key {
@@ -288,17 +334,17 @@ func (d *DrumDevice) HandleKey(key string) {
 			track.Steps[d.cursor].Active = !track.Steps[d.cursor].Active
 		}
 	case "j", "down":
-		if d.selected > 0 {
-			d.selected--
-			if d.cursor >= d.patterns[d.pattern].Tracks[d.selected].Length {
-				d.cursor = d.patterns[d.pattern].Tracks[d.selected].Length - 1
+		if d.selected < 15 {
+			d.selected++
+			if d.cursor >= d.patterns[d.editing].Tracks[d.selected].Length {
+				d.cursor = d.patterns[d.editing].Tracks[d.selected].Length - 1
 			}
 		}
 	case "k", "up":
-		if d.selected < 15 {
-			d.selected++
-			if d.cursor >= d.patterns[d.pattern].Tracks[d.selected].Length {
-				d.cursor = d.patterns[d.pattern].Tracks[d.selected].Length - 1
+		if d.selected > 0 {
+			d.selected--
+			if d.cursor >= d.patterns[d.editing].Tracks[d.selected].Length {
+				d.cursor = d.patterns[d.editing].Tracks[d.selected].Length - 1
 			}
 		}
 	case "[":
@@ -316,11 +362,19 @@ func (d *DrumDevice) HandleKey(key string) {
 		for s := 0; s < 32; s++ {
 			track.Steps[s].Active = false
 		}
+	case "<", ",":
+		if d.editing > 0 {
+			d.editing--
+		}
+	case ">", ".":
+		if d.editing < NumPatterns-1 {
+			d.editing++
+		}
 	}
 }
 
 func (d *DrumDevice) HandlePad(row, col int) {
-	pat := d.patterns[d.pattern]
+	pat := d.patterns[d.editing]
 
 	// Top 4 rows (rows 4-7): step toggle
 	if row >= 4 && row <= 7 {

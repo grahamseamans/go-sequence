@@ -11,53 +11,37 @@ import (
 	"go-sequence/midi"
 	"go-sequence/sequencer"
 	"go-sequence/theme"
-	"go-sequence/widgets"
 )
-
-// layoutBounds holds cached layout info
-type layoutBounds struct {
-	lpHelpTop    int
-	lpHelpHeight int
-}
 
 type Model struct {
 	Manager    *sequencer.Manager
 	DeviceMgr  *midi.DeviceManager
 	Config     *config.Config
 	Theme      *theme.Theme
-	lpHelp     *widgets.LaunchpadHelp
 	quitting   bool
-	mouseX     int
-	mouseY     int
-	tooltip    string
-	bounds     *layoutBounds
-	controller midi.Controller // current controller (may be nil)
-	statusMsg  string          // temporary status message
+	controller midi.Controller
+	statusMsg  string
 }
 
 type UpdateMsg struct{}
 
 type RescanResultMsg struct {
-	controller midi.Controller
-	err        error
+	controller  midi.Controller
+	err         error
+	midiInputs  []string
+	midiOutputs []string
 }
 
 func NewModel(manager *sequencer.Manager, deviceMgr *midi.DeviceManager, cfg *config.Config, th *theme.Theme) Model {
-	lp := widgets.NewLaunchpadHelp()
-	if focused := manager.GetFocused(); focused != nil {
-		lp.SetLayout(focused.HelpLayout())
-	}
-	// Get already-connected controller if any
 	controller := deviceMgr.GetController()
-	return Model{
+	m := Model{
 		Manager:    manager,
 		DeviceMgr:  deviceMgr,
 		Config:     cfg,
 		Theme:      th,
-		lpHelp:     lp,
-		bounds:     &layoutBounds{},
 		controller: controller,
 	}
+	return m
 }
 
 func ListenForUpdates(manager *sequencer.Manager) tea.Cmd {
@@ -67,19 +51,20 @@ func ListenForUpdates(manager *sequencer.Manager) tea.Cmd {
 	}
 }
 
-// RescanDevices attempts to connect to a controller (runs in background with timeout)
 func RescanDevices(deviceMgr *midi.DeviceManager, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
+		// Get port lists first
+		inputs, outputs, _ := deviceMgr.ScanPorts()
+
 		err := deviceMgr.Connect(cfg)
 		if err != nil {
-			return RescanResultMsg{err: err}
+			return RescanResultMsg{err: err, midiInputs: inputs, midiOutputs: outputs}
 		}
-		return RescanResultMsg{controller: deviceMgr.GetController()}
+		return RescanResultMsg{controller: deviceMgr.GetController(), midiInputs: inputs, midiOutputs: outputs}
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	// Start listening for pad events if controller already connected
 	var cmds []tea.Cmd
 	cmds = append(cmds, ListenForUpdates(m.Manager))
 
@@ -90,7 +75,6 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// listenForPads creates a command that listens for pad events from the controller
 func (m Model) listenForPads() tea.Cmd {
 	if m.controller == nil {
 		return nil
@@ -107,7 +91,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "Q", "ctrl+c":
 			m.quitting = true
 			m.Manager.Stop()
 			return m, tea.Quit
@@ -129,35 +113,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Manager.SetTempo(tempo - 5)
 
 		case "r":
-			// Manual rescan for MIDI devices
-			m.statusMsg = "Scanning..."
-			return m, RescanDevices(m.DeviceMgr, m.Config)
+			// Only allow rescan from settings device
+			if _, ok := m.Manager.GetFocused().(*sequencer.SettingsDevice); ok {
+				m.statusMsg = "Scanning..."
+				return m, RescanDevices(m.DeviceMgr, m.Config)
+			}
+			m.Manager.HandleKey(msg.String())
 
 		case "0":
 			m.Manager.FocusSession()
-			if focused := m.Manager.GetFocused(); focused != nil {
-				m.lpHelp.SetLayout(focused.HelpLayout())
-			}
+
+		case ",":
+			m.Manager.FocusSettings()
 
 		case "1", "2", "3", "4", "5", "6", "7", "8":
 			idx := int(msg.String()[0] - '1')
 			m.Manager.FocusDevice(idx)
-			if focused := m.Manager.GetFocused(); focused != nil {
-				m.lpHelp.SetLayout(focused.HelpLayout())
-			}
 
 		default:
 			m.Manager.HandleKey(msg.String())
 		}
 
-	case tea.MouseMsg:
-		m.mouseX, m.mouseY = msg.X, msg.Y
-		m.tooltip = m.hitTest(msg.X, msg.Y)
-
 	case UpdateMsg:
 		return m, ListenForUpdates(m.Manager)
 
 	case RescanResultMsg:
+		// Update settings with port info
+		if settings := m.Manager.GetSettings(); settings != nil {
+			settings.SetMIDIPorts(msg.midiInputs, msg.midiOutputs)
+		}
+
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("No device: %v", msg.err)
 			m.controller = nil
@@ -166,23 +151,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = fmt.Sprintf("Connected: %s", msg.controller.ID())
 			m.controller = msg.controller
 			m.Manager.SetController(msg.controller)
-			// Start listening for pad events
 			return m, m.listenForPads()
 		}
 	}
 
 	return m, nil
-}
-
-func (m Model) hitTest(x, y int) string {
-	if y >= m.bounds.lpHelpTop && y < m.bounds.lpHelpTop+m.bounds.lpHelpHeight {
-		relX := x
-		relY := y - m.bounds.lpHelpTop
-		if hit, tooltip := m.lpHelp.HitTest(relX, relY); hit {
-			return tooltip
-		}
-	}
-	return ""
 }
 
 func (m Model) View() string {
@@ -193,55 +166,45 @@ func (m Model) View() string {
 	step, playing, tempo := m.Manager.GetState()
 
 	// Styles
-	headerStyle := lipgloss.NewStyle().Foreground(m.Theme.Accent())
+	titleStyle := lipgloss.NewStyle().Foreground(m.Theme.Accent()).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(m.Theme.Muted())
-	tooltipStyle := lipgloss.NewStyle().
-		Foreground(m.Theme.FG()).
-		Background(m.Theme.Muted()).
-		Padding(0, 1)
+	borderStyle := lipgloss.NewStyle().Foreground(m.Theme.Muted())
 
-	// Header with device status
+	// Transport status
 	playState := "STOP"
 	if playing {
 		playState = "PLAY"
 	}
 
-	deviceStatus := " [no ctrl - r:scan]"
+	ctrlStatus := "no controller"
 	if m.controller != nil {
-		deviceStatus = " [LP:X]"
+		ctrlStatus = "Launchpad X"
 	}
 
-	header := headerStyle.Render(fmt.Sprintf("go-sequence  %s  %3dbpm  step:%02d%s", playState, tempo, step, deviceStatus))
+	// Header block
+	title := titleStyle.Render("go-sequence")
+	status := fmt.Sprintf("  %s  %3d bpm  step %02d  [%s]", playState, tempo, step+1, ctrlStatus)
+	controls := dimStyle.Render("p:play  +/-:tempo  0:session  1-8:device  ,:settings  r:rescan  q:quit")
+	border := borderStyle.Render("════════════════════════════════════════════════════════════════")
 
-	// Device view
+	// Device view (includes grid, key help, and launchpad)
 	deviceView := m.Manager.View()
-
-	// Launchpad help
-	lpView := m.lpHelp.View()
-
-	// Help line
-	help := dimStyle.Render("0:session 1-8:device  hjkl:nav  space:toggle  p:play  +/-:tempo  r:scan  q:quit")
-
-	// Compute layout bounds
-	headerHeight := lipgloss.Height(header)
-	deviceHeight := lipgloss.Height(deviceView)
-	m.bounds.lpHelpTop = 1 + headerHeight + 1 + deviceHeight
-	m.bounds.lpHelpHeight = lipgloss.Height(lpView)
 
 	// Build output
 	var out strings.Builder
 	out.WriteString("\n")
-	out.WriteString(header)
+	out.WriteString(title)
+	out.WriteString(status)
+	if m.statusMsg != "" {
+		out.WriteString("  ")
+		out.WriteString(dimStyle.Render(m.statusMsg))
+	}
+	out.WriteString("\n")
+	out.WriteString(controls)
+	out.WriteString("\n")
+	out.WriteString(border)
 	out.WriteString("\n\n")
 	out.WriteString(deviceView)
-	out.WriteString(lpView)
-	out.WriteString("\n\n")
-	out.WriteString(help)
-
-	if m.tooltip != "" {
-		out.WriteString("\n")
-		out.WriteString(tooltipStyle.Render(m.tooltip))
-	}
 
 	return out.String()
 }

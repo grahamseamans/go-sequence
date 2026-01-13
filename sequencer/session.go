@@ -8,18 +8,18 @@ import (
 )
 
 type SessionDevice struct {
-	devices []Device
+	tracks []*Track
 
 	// UI state
 	cursorRow  int // pattern
-	cursorCol  int // device
+	cursorCol  int // track
 	viewRows   int // how many rows to show (default 8)
 	viewOffset int // scroll offset
 }
 
-func NewSessionDevice(devices []Device) *SessionDevice {
+func NewSessionDevice(tracks []*Track) *SessionDevice {
 	return &SessionDevice{
-		devices:    devices,
+		tracks:     tracks,
 		cursorRow:  0,
 		cursorCol:  0,
 		viewRows:   8,
@@ -47,29 +47,33 @@ func (s *SessionDevice) ContentMask() []bool {
 }
 
 func (s *SessionDevice) HandleMIDI(event midi.Event) {
-	if event.Type == midi.NoteOn && int(event.Channel) < len(s.devices) {
-		s.devices[event.Channel].QueuePattern(int(event.Note))
+	if event.Type == midi.NoteOn && int(event.Channel) < len(s.tracks) {
+		s.tracks[event.Channel].QueuePattern(int(event.Note))
 	}
 }
 
 func (s *SessionDevice) View() string {
 	var out string
-	out += "SESSION\n"
+	out += "SESSION  Clip Launcher\n\n"
 	out += "       "
-	for i := range s.devices {
-		out += fmt.Sprintf(" D%d ", i+1)
+	for i, t := range s.tracks {
+		if t.Name != "" {
+			out += fmt.Sprintf(" %s ", t.Name[:min(2, len(t.Name))])
+		} else {
+			out += fmt.Sprintf(" T%d ", i+1)
+		}
 	}
 	out += "\n"
 
-	masks := make([][]bool, len(s.devices))
-	for i, dev := range s.devices {
-		masks[i] = dev.ContentMask()
+	masks := make([][]bool, len(s.tracks))
+	for i, t := range s.tracks {
+		masks[i] = t.ContentMask()
 	}
 
 	for row := s.viewOffset; row < s.viewOffset+s.viewRows && row < NumPatterns; row++ {
 		out += fmt.Sprintf("Pat %2d: ", row+1)
-		for col, dev := range s.devices {
-			pattern, next := dev.GetState()
+		for col, t := range s.tracks {
+			pattern, next := t.GetState()
 			hasContent := masks[col][row]
 
 			char := " "
@@ -91,41 +95,93 @@ func (s *SessionDevice) View() string {
 		out += "\n"
 	}
 
+	// Legend
+	out += "\n▶ playing  ◆ queued  · has content  - empty track\n"
+
+	// Key help
+	out += "\n"
+	out += widgets.RenderKeyHelp([]widgets.KeySection{
+		{Keys: []widgets.KeyBinding{
+			{Key: "h / l", Desc: "move cursor left/right (tracks)"},
+			{Key: "j / k", Desc: "move cursor up/down (patterns)"},
+			{Key: "space", Desc: "launch clip"},
+			{Key: "1-8", Desc: "focus device on that track"},
+		}},
+	})
+
+	// Launchpad
+	out += "\n\n"
+	out += widgets.RenderLaunchpad(s.HelpLayout())
+	out += "\n"
+	out += widgets.RenderLegend([]widgets.Zone{
+		{Name: "Clips", Color: [3]uint8{71, 13, 121}, Desc: "tap to launch clip"},
+		{Name: "Scene", Color: [3]uint8{148, 18, 126}, Desc: "launch entire row"},
+	})
+
 	return out
 }
 
 func (s *SessionDevice) RenderLEDs() []LEDState {
 	var leds []LEDState
 
-	masks := make([][]bool, len(s.devices))
-	for i, dev := range s.devices {
-		masks[i] = dev.ContentMask()
+	// Colors matching HelpLayout - RGB values
+	clipsPlaying := [3]uint8{71, 13, 121}      // purple - playing with content
+	clipsPlayingEmpty := [3]uint8{40, 40, 40}  // gray - playing but empty
+	clipsBright := [3]uint8{140, 26, 242}      // bright purple - has content
+	clipsQueued := [3]uint8{255, 200, 0}       // yellow - queued
+	clipsDim := [3]uint8{20, 4, 30}            // very dim purple - empty slot
+	sceneColor := [3]uint8{148, 18, 126}       // scene buttons
+
+	masks := make([][]bool, len(s.tracks))
+	for i, t := range s.tracks {
+		masks[i] = t.ContentMask()
 	}
 
-	for col, dev := range s.devices {
-		pattern, next := dev.GetState()
+	// Main grid - clips
+	for col, t := range s.tracks {
+		pattern, next := t.GetState()
 
 		for lpRow := 0; lpRow < 8; lpRow++ {
 			patternRow := s.viewOffset + (7 - lpRow)
 
-			var color uint8 = midi.ColorOff
-			var channel uint8 = 0
+			var color [3]uint8 = clipsDim // empty slots still visible
+			var channel uint8 = midi.ChannelStatic
 
 			if patternRow < NumPatterns {
 				hasContent := masks[col][patternRow]
 
 				if pattern == patternRow {
-					color = midi.ColorGreen
+					if hasContent {
+						// Playing with content - bright pulsing
+						color = clipsPlaying
+						channel = midi.ChannelPulse
+					} else {
+						// Playing but empty - gray
+						color = clipsPlayingEmpty
+					}
 				} else if next == patternRow && next != pattern {
-					color = midi.ColorYellow
-					channel = 2
+					if hasContent {
+						// Queued with content
+						color = clipsQueued
+						channel = midi.ChannelPulse
+					} else {
+						// Queued but empty
+						color = clipsDim
+					}
 				} else if hasContent {
-					color = midi.ColorDim
+					// Has content but not playing
+					color = clipsBright
 				}
+				// Empty + not playing stays clipsDim
 			}
 
 			leds = append(leds, LEDState{Row: lpRow, Col: col, Color: color, Channel: channel})
 		}
+	}
+
+	// Right column - scene launch buttons
+	for row := 0; row < 8; row++ {
+		leds = append(leds, LEDState{Row: row, Col: 8, Color: sceneColor, Channel: midi.ChannelStatic})
 	}
 
 	return leds
@@ -138,7 +194,7 @@ func (s *SessionDevice) HandleKey(key string) {
 			s.cursorCol--
 		}
 	case "l", "right":
-		if s.cursorCol < len(s.devices)-1 {
+		if s.cursorCol < len(s.tracks)-1 {
 			s.cursorCol++
 		}
 	case "j", "down":
@@ -156,16 +212,16 @@ func (s *SessionDevice) HandleKey(key string) {
 			}
 		}
 	case " ", "enter":
-		if s.cursorCol < len(s.devices) {
-			s.devices[s.cursorCol].QueuePattern(s.cursorRow)
+		if s.cursorCol < len(s.tracks) {
+			s.tracks[s.cursorCol].QueuePattern(s.cursorRow)
 		}
 	}
 }
 
 func (s *SessionDevice) HandlePad(row, col int) {
 	patternRow := s.viewOffset + (7 - row)
-	if col < len(s.devices) && patternRow < NumPatterns {
-		s.devices[col].QueuePattern(patternRow)
+	if col < len(s.tracks) && patternRow < NumPatterns {
+		s.tracks[col].QueuePattern(patternRow)
 	}
 }
 

@@ -67,6 +67,11 @@ func (kb *KeyboardController) SetLED(row, col int, color uint8, channel uint8) e
 	return nil
 }
 
+// SetLEDRGB is a no-op for keyboards
+func (kb *KeyboardController) SetLEDRGB(row, col int, rgb [3]uint8, channel uint8) error {
+	return nil
+}
+
 // ClearLEDs is a no-op for keyboards
 func (kb *KeyboardController) ClearLEDs() error {
 	return nil

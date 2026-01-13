@@ -12,9 +12,9 @@ import (
 
 // Manager orchestrates sequencer playback and device management
 type Manager struct {
-	session    *SessionDevice
-	devices    []Device
-	channelMap []uint8 // internal channel → external MIDI channel
+	session  *SessionDevice
+	settings *SettingsDevice
+	tracks   []*Track // tracks own devices and MIDI channel assignments
 
 	outPort drivers.Out
 	send    func(msg gomidi.Message) error
@@ -35,18 +35,11 @@ type Manager struct {
 
 // NewManager creates a new sequencer manager
 func NewManager() *Manager {
-	m := &Manager{
+	return &Manager{
 		tempo:      120,
-		channelMap: make([]uint8, 16),
+		tracks:     make([]*Track, 0),
 		UpdateChan: make(chan struct{}, 1),
 	}
-
-	// Default channel map: internal = external
-	for i := range m.channelMap {
-		m.channelMap[i] = uint8(i)
-	}
-
-	return m
 }
 
 // SetController sets the MIDI controller for LED feedback
@@ -55,24 +48,51 @@ func (m *Manager) SetController(c midi.Controller) {
 	if m.controller != nil && m.focused != nil {
 		m.controller.ClearLEDs()
 		for _, led := range m.focused.RenderLEDs() {
-			m.controller.SetLED(led.Row, led.Col, led.Color, led.Channel)
+			m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
 		}
 	}
 }
 
-// AddDevice adds a musical device to the sequencer
-func (m *Manager) AddDevice(d Device, externalChannel uint8) {
-	m.devices = append(m.devices, d)
-	idx := len(m.devices)
-	if idx < len(m.channelMap) {
-		m.channelMap[idx] = externalChannel
+// AddTrack creates a new track with the given name and MIDI channel.
+func (m *Manager) AddTrack(name string, channel uint8) *Track {
+	t := NewTrack(name, channel)
+	m.tracks = append(m.tracks, t)
+	return t
+}
+
+// SetTrackDevice assigns a device to a track by index.
+func (m *Manager) SetTrackDevice(idx int, d Device) {
+	if idx >= 0 && idx < len(m.tracks) {
+		m.tracks[idx].Device = d
 	}
+}
+
+// Tracks returns the list of tracks.
+func (m *Manager) Tracks() []*Track {
+	return m.tracks
 }
 
 // SetSession sets the session device
 func (m *Manager) SetSession(s *SessionDevice) {
 	m.session = s
 	m.focused = s // Session is focused by default
+}
+
+// SetSettings sets the settings device
+func (m *Manager) SetSettings(s *SettingsDevice) {
+	m.settings = s
+}
+
+// GetSettings returns the settings device
+func (m *Manager) GetSettings() *SettingsDevice {
+	return m.settings
+}
+
+// FocusSettings focuses the settings device
+func (m *Manager) FocusSettings() {
+	if m.settings != nil {
+		m.SetFocused(m.settings)
+	}
 }
 
 // OpenMIDI opens a MIDI output port for note output
@@ -129,30 +149,32 @@ func (m *Manager) tickLoop() {
 		// Calculate step duration (16th notes)
 		stepDuration := time.Duration(float64(time.Second) * 60.0 / float64(tempo) / 4.0)
 
-		// 1. Tick all devices → collect MIDI events
+		// 1. Tick all tracks → collect MIDI events with track's channel
 		var events []midi.Event
-		for i, dev := range m.devices {
-			devEvents := dev.Tick(step)
+		for _, track := range m.tracks {
+			if track.Device == nil || track.Muted {
+				continue
+			}
+			devEvents := track.Device.Tick(step)
 			for _, e := range devEvents {
-				e.Channel = uint8(i + 1) // internal channel
+				e.Channel = track.Channel // use track's MIDI channel
 				events = append(events, e)
 			}
 		}
 
-		// 2. Translate internal → external channels and send
+		// 2. Send MIDI events (channel already set from track)
 		if m.send != nil {
 			for _, e := range events {
-				extChan := m.channelMap[e.Channel]
 				switch e.Type {
 				case midi.NoteOn:
-					m.send(gomidi.NoteOn(extChan, e.Note, e.Velocity))
+					m.send(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
 					// Schedule note off
 					go func(ch, note uint8) {
 						time.Sleep(stepDuration * 80 / 100)
 						m.send(gomidi.NoteOff(ch, note))
-					}(extChan, e.Note)
+					}(e.Channel, e.Note)
 				case midi.NoteOff:
-					m.send(gomidi.NoteOff(extChan, e.Note))
+					m.send(gomidi.NoteOff(e.Channel, e.Note))
 				}
 			}
 		}
@@ -160,7 +182,7 @@ func (m *Manager) tickLoop() {
 		// 3. Update LEDs on focused device
 		if m.focused != nil && m.controller != nil {
 			for _, led := range m.focused.RenderLEDs() {
-				m.controller.SetLED(led.Row, led.Col, led.Color, led.Channel)
+				m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
 			}
 		}
 
@@ -217,7 +239,7 @@ func (m *Manager) SetFocused(d Device) {
 	if m.focused != nil && m.controller != nil {
 		m.controller.ClearLEDs()
 		for _, led := range m.focused.RenderLEDs() {
-			m.controller.SetLED(led.Row, led.Col, led.Color, led.Channel)
+			m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
 		}
 	}
 }
@@ -227,10 +249,10 @@ func (m *Manager) FocusSession() {
 	m.SetFocused(m.session)
 }
 
-// FocusDevice focuses a device by index
+// FocusDevice focuses a device by track index (works for any device including empty)
 func (m *Manager) FocusDevice(idx int) {
-	if idx >= 0 && idx < len(m.devices) {
-		m.SetFocused(m.devices[idx])
+	if idx >= 0 && idx < len(m.tracks) && m.tracks[idx].Device != nil {
+		m.SetFocused(m.tracks[idx].Device)
 	}
 }
 
@@ -240,6 +262,7 @@ func (m *Manager) FocusDevice(idx int) {
 func (m *Manager) HandleKey(key string) {
 	if m.focused != nil {
 		m.focused.HandleKey(key)
+		m.notifyUpdate()
 	}
 }
 
@@ -247,6 +270,22 @@ func (m *Manager) HandleKey(key string) {
 func (m *Manager) HandlePad(row, col int) {
 	if m.focused != nil {
 		m.focused.HandlePad(row, col)
+		m.notifyUpdate()
+	}
+}
+
+// notifyUpdate refreshes LEDs and notifies TUI
+func (m *Manager) notifyUpdate() {
+	// Update LEDs
+	if m.controller != nil && m.focused != nil {
+		for _, led := range m.focused.RenderLEDs() {
+			m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
+		}
+	}
+	// Notify TUI
+	select {
+	case m.UpdateChan <- struct{}{}:
+	default:
 	}
 }
 
@@ -258,7 +297,13 @@ func (m *Manager) View() string {
 	return ""
 }
 
-// Devices returns the list of devices
+// Devices returns all non-nil devices from tracks (for backward compatibility)
 func (m *Manager) Devices() []Device {
-	return m.devices
+	var devices []Device
+	for _, t := range m.tracks {
+		if t.Device != nil {
+			devices = append(devices, t.Device)
+		}
+	}
+	return devices
 }
