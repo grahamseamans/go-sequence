@@ -7,6 +7,12 @@ import (
 
 const NumPatterns = 128
 
+// Piano roll view modes
+const (
+	ViewSmushed = 12 // fewer rows, notes closer together
+	ViewSpread  = 24 // more rows, notes spread out
+)
+
 // DeviceType identifies what kind of sequencer device
 type DeviceType string
 
@@ -24,7 +30,6 @@ type Device interface {
 
 	// Pattern control (called by SessionDevice)
 	QueuePattern(p int) (pattern, next int) // queue pattern, returns current state
-	GetState() (pattern, next int)          // read state without changing
 	ContentMask() []bool                    // which patterns have content
 
 	// External MIDI input (keyboard for recording, etc.)

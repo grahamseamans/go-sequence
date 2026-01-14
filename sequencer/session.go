@@ -8,7 +8,7 @@ import (
 )
 
 type SessionDevice struct {
-	tracks []*Track
+	manager *Manager
 
 	// UI state
 	cursorRow  int // pattern
@@ -17,13 +17,40 @@ type SessionDevice struct {
 	viewOffset int // scroll offset
 }
 
-func NewSessionDevice(tracks []*Track) *SessionDevice {
+func NewSessionDevice(manager *Manager) *SessionDevice {
 	return &SessionDevice{
-		tracks:     tracks,
+		manager:    manager,
 		cursorRow:  0,
 		cursorCol:  0,
 		viewRows:   8,
 		viewOffset: 0,
+	}
+}
+
+// getTrackPatternState returns (pattern, next) for a track by reading global state
+func (s *SessionDevice) getTrackPatternState(trackIdx int) (pattern, next int) {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return 0, 0
+	}
+	ts := S.Tracks[trackIdx]
+	switch ts.Type {
+	case DeviceTypeDrum:
+		if ts.Drum != nil {
+			return ts.Drum.Pattern, ts.Drum.Next
+		}
+	case DeviceTypePiano:
+		if ts.Piano != nil {
+			return ts.Piano.Pattern, ts.Piano.Next
+		}
+	}
+	return 0, 0
+}
+
+// queuePattern queues a pattern on a device
+func (s *SessionDevice) queuePattern(trackIdx, patternIdx int) {
+	dev := s.manager.GetDevice(trackIdx)
+	if dev != nil {
+		dev.QueuePattern(patternIdx)
 	}
 }
 
@@ -38,17 +65,13 @@ func (s *SessionDevice) QueuePattern(p int) (pattern, next int) {
 	return 0, 0
 }
 
-func (s *SessionDevice) GetState() (pattern, next int) {
-	return 0, 0
-}
-
 func (s *SessionDevice) ContentMask() []bool {
 	return make([]bool, NumPatterns)
 }
 
 func (s *SessionDevice) HandleMIDI(event midi.Event) {
-	if event.Type == midi.NoteOn && int(event.Channel) < len(s.tracks) {
-		s.tracks[event.Channel].QueuePattern(int(event.Note))
+	if event.Type == midi.NoteOn && int(event.Channel) < 8 {
+		s.queuePattern(int(event.Channel), int(event.Note))
 	}
 }
 
@@ -56,24 +79,30 @@ func (s *SessionDevice) View() string {
 	var out string
 	out += "SESSION  Clip Launcher\n\n"
 	out += "       "
-	for i, t := range s.tracks {
-		if t.Name != "" {
-			out += fmt.Sprintf(" %s ", t.Name[:min(2, len(t.Name))])
+	for i := 0; i < 8; i++ {
+		ts := S.Tracks[i]
+		if ts.Name != "" {
+			out += fmt.Sprintf(" %s ", ts.Name[:min(2, len(ts.Name))])
 		} else {
 			out += fmt.Sprintf(" T%d ", i+1)
 		}
 	}
 	out += "\n"
 
-	masks := make([][]bool, len(s.tracks))
-	for i, t := range s.tracks {
-		masks[i] = t.ContentMask()
+	masks := make([][]bool, 8)
+	for i := 0; i < 8; i++ {
+		dev := s.manager.GetDevice(i)
+		if dev != nil {
+			masks[i] = dev.ContentMask()
+		} else {
+			masks[i] = make([]bool, NumPatterns)
+		}
 	}
 
 	for row := s.viewOffset; row < s.viewOffset+s.viewRows && row < NumPatterns; row++ {
 		out += fmt.Sprintf("Pat %2d: ", row+1)
-		for col, t := range s.tracks {
-			pattern, next := t.GetState()
+		for col := 0; col < 8; col++ {
+			pattern, next := s.getTrackPatternState(col)
 			hasContent := masks[col][row]
 
 			char := " "
@@ -132,14 +161,19 @@ func (s *SessionDevice) RenderLEDs() []LEDState {
 	clipsDim := [3]uint8{20, 4, 30}            // very dim purple - empty slot
 	sceneColor := [3]uint8{148, 18, 126}       // scene buttons
 
-	masks := make([][]bool, len(s.tracks))
-	for i, t := range s.tracks {
-		masks[i] = t.ContentMask()
+	masks := make([][]bool, 8)
+	for i := 0; i < 8; i++ {
+		dev := s.manager.GetDevice(i)
+		if dev != nil {
+			masks[i] = dev.ContentMask()
+		} else {
+			masks[i] = make([]bool, NumPatterns)
+		}
 	}
 
 	// Main grid - clips
-	for col, t := range s.tracks {
-		pattern, next := t.GetState()
+	for col := 0; col < 8; col++ {
+		pattern, next := s.getTrackPatternState(col)
 
 		for lpRow := 0; lpRow < 8; lpRow++ {
 			patternRow := s.viewOffset + (7 - lpRow)
@@ -194,7 +228,7 @@ func (s *SessionDevice) HandleKey(key string) {
 			s.cursorCol--
 		}
 	case "l", "right":
-		if s.cursorCol < len(s.tracks)-1 {
+		if s.cursorCol < 7 {
 			s.cursorCol++
 		}
 	case "j", "down":
@@ -212,16 +246,14 @@ func (s *SessionDevice) HandleKey(key string) {
 			}
 		}
 	case " ", "enter":
-		if s.cursorCol < len(s.tracks) {
-			s.tracks[s.cursorCol].QueuePattern(s.cursorRow)
-		}
+		s.queuePattern(s.cursorCol, s.cursorRow)
 	}
 }
 
 func (s *SessionDevice) HandlePad(row, col int) {
 	patternRow := s.viewOffset + (7 - row)
-	if col < len(s.tracks) && patternRow < NumPatterns {
-		s.tracks[col].QueuePattern(patternRow)
+	if col < 8 && patternRow < NumPatterns {
+		s.queuePattern(col, patternRow)
 	}
 }
 

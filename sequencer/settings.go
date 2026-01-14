@@ -24,14 +24,13 @@ type PopupState struct {
 	Type        PopupType
 	Options     []string
 	Selected    int
-	TrackIndex  int    // which track this popup is for
+	TrackIndex  int        // which track this popup is for
 	PendingType DeviceType // for confirmation dialogs
 }
 
 // SettingsDevice manages track and MIDI configuration
 type SettingsDevice struct {
-	tracks    []*Track
-	manager   *Manager // need reference for device creation
+	manager *Manager // reference for device access and creation
 
 	// Cursor position
 	cursorRow int // 0-7 for tracks
@@ -46,9 +45,8 @@ type SettingsDevice struct {
 }
 
 // NewSettingsDevice creates a settings device
-func NewSettingsDevice(tracks []*Track, manager *Manager) *SettingsDevice {
+func NewSettingsDevice(manager *Manager) *SettingsDevice {
 	return &SettingsDevice{
-		tracks:    tracks,
 		manager:   manager,
 		cursorRow: 0,
 		cursorCol: 0,
@@ -71,10 +69,6 @@ func (s *SettingsDevice) QueuePattern(p int) (pattern, next int) {
 	return 0, 0
 }
 
-func (s *SettingsDevice) GetState() (pattern, next int) {
-	return 0, 0
-}
-
 func (s *SettingsDevice) ContentMask() []bool {
 	return make([]bool, NumPatterns)
 }
@@ -94,19 +88,14 @@ func (s *SettingsDevice) View() string {
 
 	// Track rows
 	for i := 0; i < 8; i++ {
-		var track *Track
-		if i < len(s.tracks) {
-			track = s.tracks[i]
-		}
+		ts := S.Tracks[i]
+		dev := s.manager.GetDevice(i)
 
 		// Track number
 		out.WriteString(fmt.Sprintf("  %d     ", i+1))
 
 		// Device type cell
-		deviceStr := "(empty)"
-		if track != nil && track.Device != nil {
-			deviceStr = s.getDeviceTypeName(track)
-		}
+		deviceStr := s.getDeviceTypeName(i)
 		if s.cursorRow == i && s.cursorCol == 0 {
 			out.WriteString(fmt.Sprintf("[%-8s]  ", deviceStr))
 		} else {
@@ -114,20 +103,23 @@ func (s *SettingsDevice) View() string {
 		}
 
 		// Channel cell
-		channelStr := "-"
-		if track != nil {
-			channelStr = fmt.Sprintf("ch %d", track.Channel)
-		}
+		channelStr := fmt.Sprintf("ch %d", ts.Channel)
 		if s.cursorRow == i && s.cursorCol == 1 {
 			out.WriteString(fmt.Sprintf("[%-5s]  ", channelStr))
 		} else {
 			out.WriteString(fmt.Sprintf(" %-5s   ", channelStr))
 		}
 
-		// Output cell (placeholder for now)
-		outputStr := "-"
-		if track != nil && track.Device != nil {
-			outputStr = "default"
+		// Output cell
+		outputStr := "(default)"
+		if ts.PortName != "" {
+			// Truncate long port names
+			outputStr = ts.PortName
+			if len(outputStr) > 12 {
+				outputStr = outputStr[:12]
+			}
+		} else if dev == nil || ts.Type == DeviceTypeNone {
+			outputStr = "-"
 		}
 		if s.cursorRow == i && s.cursorCol == 2 {
 			out.WriteString(fmt.Sprintf("[%-12s]", outputStr))
@@ -252,19 +244,15 @@ func (s *SettingsDevice) renderPopup() string {
 	return out.String()
 }
 
-func (s *SettingsDevice) getDeviceTypeName(track *Track) string {
-	if track == nil || track.Device == nil {
-		return "(empty)"
-	}
-	switch track.Device.(type) {
-	case *DrumDevice:
+func (s *SettingsDevice) getDeviceTypeName(trackIdx int) string {
+	ts := S.Tracks[trackIdx]
+	switch ts.Type {
+	case DeviceTypeDrum:
 		return "Drum"
-	case *PianoRollDevice:
+	case DeviceTypePiano:
 		return "Piano"
-	case *EmptyDevice:
-		return "(empty)"
 	default:
-		return "Unknown"
+		return "(empty)"
 	}
 }
 
@@ -280,7 +268,7 @@ func (s *SettingsDevice) RenderLEDs() []LEDState {
 		var color [3]uint8
 		if row == s.cursorRow {
 			color = selectedColor
-		} else if row < len(s.tracks) && s.tracks[row].Device != nil {
+		} else if S.Tracks[row].Type != DeviceTypeNone {
 			color = trackColor
 		} else {
 			color = emptyColor
@@ -351,23 +339,27 @@ func (s *SettingsDevice) openPopupForCurrentCell() {
 		s.popup = &PopupState{
 			Type:       PopupChannel,
 			Options:    options,
-			Selected:   0,
+			Selected:   int(S.Tracks[s.cursorRow].Channel) - 1,
 			TrackIndex: s.cursorRow,
 		}
-		// Pre-select current channel
-		if s.cursorRow < len(s.tracks) {
-			s.popup.Selected = int(s.tracks[s.cursorRow].Channel) - 1
-			if s.popup.Selected < 0 {
-				s.popup.Selected = 0
-			}
+		if s.popup.Selected < 0 {
+			s.popup.Selected = 0
 		}
 	case 2: // Output
-		options := []string{"default"}
+		options := []string{"(default)"}
 		options = append(options, s.midiOutputs...)
+		selected := 0
+		// Find current port in list
+		for i, port := range s.midiOutputs {
+			if port == S.Tracks[s.cursorRow].PortName {
+				selected = i + 1 // +1 because "(default)" is at index 0
+				break
+			}
+		}
 		s.popup = &PopupState{
 			Type:       PopupOutput,
 			Options:    options,
-			Selected:   0,
+			Selected:   selected,
 			TrackIndex: s.cursorRow,
 		}
 	}
@@ -379,23 +371,20 @@ func (s *SettingsDevice) confirmPopupSelection() {
 	}
 
 	trackIdx := s.popup.TrackIndex
-	if trackIdx >= len(s.tracks) {
-		s.popup = nil
-		return
-	}
-	track := s.tracks[trackIdx]
+	ts := S.Tracks[trackIdx]
 
 	switch s.popup.Type {
 	case PopupDeviceType:
 		// Check if track has content and we're changing type
-		currentType := s.getDeviceTypeName(track)
+		currentType := s.getDeviceTypeName(trackIdx)
 		newType := s.popup.Options[s.popup.Selected]
 
 		if currentType != "(empty)" && currentType != newType {
 			// Need confirmation - check if device has content
 			hasContent := false
-			if track.Device != nil {
-				mask := track.Device.ContentMask()
+			dev := s.manager.GetDevice(trackIdx)
+			if dev != nil {
+				mask := dev.ContentMask()
 				for _, has := range mask {
 					if has {
 						hasContent = true
@@ -427,10 +416,14 @@ func (s *SettingsDevice) confirmPopupSelection() {
 		}
 
 	case PopupChannel:
-		track.Channel = uint8(s.popup.Selected + 1)
+		ts.Channel = uint8(s.popup.Selected + 1)
 
 	case PopupOutput:
-		// TODO: implement per-track output
+		if s.popup.Selected == 0 {
+			ts.PortName = "" // default
+		} else {
+			ts.PortName = s.midiOutputs[s.popup.Selected-1]
+		}
 	}
 
 	s.popup = nil
@@ -448,19 +441,16 @@ func (s *SettingsDevice) optionToDeviceType(opt string) DeviceType {
 }
 
 func (s *SettingsDevice) changeDeviceType(trackIdx int, deviceType DeviceType) {
-	if trackIdx >= len(s.tracks) {
-		return
-	}
-	track := s.tracks[trackIdx]
-
+	var dev Device
 	switch deviceType {
 	case DeviceTypeDrum:
-		track.Device = NewDrumDevice()
+		dev = s.manager.CreateDrumDevice(trackIdx)
 	case DeviceTypePiano:
-		track.Device = NewPianoRollDevice()
+		dev = s.manager.CreatePianoDevice(trackIdx)
 	case DeviceTypeNone:
-		track.Device = NewEmptyDevice(trackIdx + 1)
+		dev = s.manager.CreateEmptyDevice(trackIdx)
 	}
+	s.manager.SetDevice(trackIdx, dev)
 }
 
 func (s *SettingsDevice) HandlePad(row, col int) {
@@ -478,7 +468,7 @@ func (s *SettingsDevice) HelpLayout() widgets.LaunchpadLayout {
 
 	// Left column shows tracks
 	for row := 0; row < 8; row++ {
-		if row < len(s.tracks) && s.tracks[row].Device != nil {
+		if S.Tracks[row].Type != DeviceTypeNone {
 			layout.Grid[row][0] = widgets.PadConfig{Color: trackColor, Tooltip: fmt.Sprintf("Track %d", row+1)}
 		} else {
 			layout.Grid[row][0] = widgets.PadConfig{Color: dimColor, Tooltip: fmt.Sprintf("Track %d (empty)", row+1)}

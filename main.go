@@ -28,26 +28,21 @@ func main() {
 	// Create sequencer manager
 	manager := sequencer.NewManager()
 
-	// Create 8 tracks (always 8)
-	for i := 0; i < 8; i++ {
-		manager.AddTrack(fmt.Sprintf("T%d", i+1), uint8(i+1))
-	}
-
-	// Assign devices to tracks (empty tracks get EmptyDevice)
-	manager.SetTrackDevice(0, sequencer.NewDrumDevice())
-	manager.SetTrackDevice(1, sequencer.NewDrumDevice())
-	manager.SetTrackDevice(2, sequencer.NewPianoRollDevice())
-	// Remaining tracks get EmptyDevice
+	// Assign devices to slots
+	manager.SetDevice(0, manager.CreateDrumDevice(0))
+	manager.SetDevice(1, manager.CreateDrumDevice(1))
+	manager.SetDevice(2, manager.CreatePianoDevice(2))
+	// Remaining slots get EmptyDevice
 	for i := 3; i < 8; i++ {
-		manager.SetTrackDevice(i, sequencer.NewEmptyDevice(i+1))
+		manager.SetDevice(i, manager.CreateEmptyDevice(i))
 	}
 
-	// Create session (clip launcher) with tracks
-	session := sequencer.NewSessionDevice(manager.Tracks())
+	// Create session (clip launcher)
+	session := sequencer.NewSessionDevice(manager)
 	manager.SetSession(session)
 
 	// Create settings device
-	settings := sequencer.NewSettingsDevice(manager.Tracks(), manager)
+	settings := sequencer.NewSettingsDevice(manager)
 	manager.SetSettings(settings)
 
 	// Create MIDI device manager

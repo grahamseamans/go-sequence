@@ -7,143 +7,60 @@ import (
 	"go-sequence/widgets"
 )
 
-type DrumStep struct {
-	Active   bool
-	Velocity uint8
-	Nudge    int8 // -64 to +63 timing offset
-}
-
-type DrumTrack struct {
-	Steps  [32]DrumStep
-	Length int   // 1-32, defaults to 16
-	Note   uint8 // MIDI note for this sound
-}
-
-type DrumPattern struct {
-	Tracks [16]DrumTrack
-}
-
-func (p *DrumPattern) MasterLength() int {
-	max := 1
-	for i := 0; i < 16; i++ {
-		if p.Tracks[i].Length > max {
-			max = p.Tracks[i].Length
-		}
-	}
-	return max
-}
-
+// DrumDevice reads/writes from central DrumState
 type DrumDevice struct {
-	patterns []*DrumPattern
-	pattern  int // currently playing
-	next     int // queued (defaults to pattern)
-	step     int // global step counter
-	selected int // which track (0-15) we're editing
-	editing  int // which pattern we're editing (independent of playing)
-
-	// UI state
-	cursor int // step cursor for keyboard nav
+	state *DrumState
 }
 
-func NewDrumDevice() *DrumDevice {
-	d := &DrumDevice{
-		patterns: make([]*DrumPattern, NumPatterns),
-		pattern:  0,
-		next:     0,
-		step:     0,
-		selected: 0,
-		editing:  0,
-		cursor:   0,
-	}
-
-	// Initialize patterns with default GM drum notes
-	gmNotes := []uint8{
-		36, // Kick
-		38, // Snare
-		42, // Closed HH
-		46, // Open HH
-		41, // Low Tom
-		43, // Mid Tom
-		45, // High Tom
-		49, // Crash
-		51, // Ride
-		39, // Clap
-		56, // Cowbell
-		75, // Clave
-		54, // Tambourine
-		69, // Cabasa
-		70, // Maracas
-		37, // Rimshot
-	}
-
-	for i := range d.patterns {
-		d.patterns[i] = &DrumPattern{}
-		for t := 0; t < 16; t++ {
-			d.patterns[i].Tracks[t] = DrumTrack{
-				Length: 16,
-				Note:   gmNotes[t],
-			}
-			// Init steps with default velocity
-			for s := 0; s < 32; s++ {
-				d.patterns[i].Tracks[t].Steps[s] = DrumStep{
-					Active:   false,
-					Velocity: 100,
-					Nudge:    0,
-				}
-			}
-		}
-	}
-
-	return d
+// NewDrumDevice creates a device that operates on the given state
+func NewDrumDevice(state *DrumState) *DrumDevice {
+	return &DrumDevice{state: state}
 }
 
 // Device interface implementation
 
 func (d *DrumDevice) Tick(step int) []midi.Event {
-	pat := d.patterns[d.pattern]
+	s := d.state
+	pat := &s.Patterns[s.Pattern]
 	masterLen := pat.MasterLength()
 
 	// Pattern switch at master length boundary
-	if d.step%masterLen == 0 {
-		d.pattern = d.next
-		pat = d.patterns[d.pattern] // refresh in case it changed
+	if s.Step%masterLen == 0 {
+		s.Pattern = s.Next
+		pat = &s.Patterns[s.Pattern]
 	}
 
 	var events []midi.Event
 	for i := 0; i < 16; i++ {
 		track := &pat.Tracks[i]
 		// Each track loops at its own length (polymeters!)
-		trackStep := d.step % track.Length
-		s := track.Steps[trackStep]
-		if s.Active {
+		trackStep := s.Step % track.Length
+		step := &track.Steps[trackStep]
+		if step.Active {
 			events = append(events, midi.Event{
 				Type:     midi.NoteOn,
 				Note:     track.Note,
-				Velocity: s.Velocity,
+				Velocity: step.Velocity,
 			})
 		}
 	}
 
 	// Keep counting - don't reset at masterLen (breaks polymeters)
-	// Wrap at large value to prevent overflow
-	d.step = (d.step + 1) % 65536
+	s.Step = (s.Step + 1) % 65536
 	return events
 }
 
 func (d *DrumDevice) QueuePattern(p int) (pattern, next int) {
-	if p >= 0 && p < len(d.patterns) {
-		d.next = p
+	if p >= 0 && p < NumPatterns {
+		d.state.Next = p
 	}
-	return d.pattern, d.next
-}
-
-func (d *DrumDevice) GetState() (pattern, next int) {
-	return d.pattern, d.next
+	return d.state.Pattern, d.state.Next
 }
 
 func (d *DrumDevice) ContentMask() []bool {
 	mask := make([]bool, NumPatterns)
-	for i, pat := range d.patterns {
+	for i := range d.state.Patterns {
+		pat := &d.state.Patterns[i]
 		for t := 0; t < 16; t++ {
 			for s := 0; s < pat.Tracks[t].Length; s++ {
 				if pat.Tracks[t].Steps[s].Active {
@@ -164,50 +81,51 @@ func (d *DrumDevice) HandleMIDI(event midi.Event) {
 }
 
 func (d *DrumDevice) View() string {
-	pat := d.patterns[d.editing]
+	s := d.state
+	pat := &s.Patterns[s.Editing]
 
 	// Header - show editing vs playing
 	playInfo := ""
-	if d.editing != d.pattern {
-		playInfo = fmt.Sprintf(" (playing:%d)", d.pattern)
+	if s.Editing != s.Pattern {
+		playInfo = fmt.Sprintf(" (playing:%d)", s.Pattern)
 	}
-	selectedTrack := &pat.Tracks[d.selected]
-	selectedStep := d.step % selectedTrack.Length
-	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Track %d\n\n", d.editing+1, playInfo, selectedStep+1, selectedTrack.Length, d.selected+1)
+	selectedTrack := &pat.Tracks[s.Selected]
+	selectedStep := s.Step % selectedTrack.Length
+	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Track %d\n\n", s.Editing+1, playInfo, selectedStep+1, selectedTrack.Length, s.Selected+1)
 
 	// 16x32 grid - single char per cell
 	for t := 0; t < 16; t++ {
 		track := &pat.Tracks[t]
-		trackStep := d.step % track.Length // each track has its own playhead
+		trackStep := s.Step % track.Length
 		out += fmt.Sprintf("%2d ", t+1)
 
-		for s := 0; s < 32; s++ {
-			isCursor := t == d.selected && s == d.cursor
+		for step := 0; step < 32; step++ {
+			isCursor := t == s.Selected && step == s.Cursor
 
 			var char string
-			if s >= track.Length {
+			if step >= track.Length {
 				if isCursor {
-					char = "□" // cursor beyond
+					char = "□"
 				} else {
-					char = "-" // beyond
+					char = "-"
 				}
-			} else if s == trackStep {
+			} else if step == trackStep {
 				if isCursor {
-					char = "▷" // cursor on playhead
+					char = "▷"
 				} else {
-					char = "▶" // playhead
+					char = "▶"
 				}
-			} else if track.Steps[s].Active {
+			} else if track.Steps[step].Active {
 				if isCursor {
-					char = "◉" // cursor on active
+					char = "◉"
 				} else {
-					char = "●" // active
+					char = "●"
 				}
 			} else {
 				if isCursor {
-					char = "○" // cursor on empty
+					char = "○"
 				} else {
-					char = "·" // empty
+					char = "·"
 				}
 			}
 
@@ -245,21 +163,22 @@ func (d *DrumDevice) View() string {
 
 func (d *DrumDevice) RenderLEDs() []LEDState {
 	var leds []LEDState
-	pat := d.patterns[d.editing]
-	track := &pat.Tracks[d.selected]
+	s := d.state
+	pat := &s.Patterns[s.Editing]
+	track := &pat.Tracks[s.Selected]
 
-	// Colors - TODO: move to theme
-	stepsColor := [3]uint8{234, 73, 116}        // pink - active step
-	stepsEmpty := [3]uint8{80, 30, 50}          // dim pink - empty but in bounds
-	trackHasContent := [3]uint8{148, 18, 126}   // purple - track has notes
-	trackEmpty := [3]uint8{40, 10, 30}          // dim - empty track
-	trackSelected := [3]uint8{255, 255, 255}    // white - selected track
-	commandsColor := [3]uint8{253, 157, 110}    // orange
-	playheadColor := [3]uint8{255, 255, 255}    // white
-	offColor := [3]uint8{0, 0, 0}               // black - beyond track length
+	// Colors
+	stepsColor := [3]uint8{234, 73, 116}
+	stepsEmpty := [3]uint8{80, 30, 50}
+	trackHasContent := [3]uint8{148, 18, 126}
+	trackEmpty := [3]uint8{40, 10, 30}
+	trackSelected := [3]uint8{255, 255, 255}
+	commandsColor := [3]uint8{253, 157, 110}
+	playheadColor := [3]uint8{255, 255, 255}
+	offColor := [3]uint8{0, 0, 0}
 
 	// Top 4 rows (rows 4-7): steps for selected track
-	trackStep := d.step % track.Length // polymeter: each track has its own position
+	trackStep := s.Step % track.Length
 	for stepIdx := 0; stepIdx < 32; stepIdx++ {
 		row := 7 - (stepIdx / 8)
 		col := stepIdx % 8
@@ -281,26 +200,26 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: channel})
 	}
 
-	// Bottom-left 4x4 (rows 0-3, cols 0-3): track select
+	// Bottom-left 4x4: track select
 	for t := 0; t < 16; t++ {
 		row := t / 4
 		col := t % 4
 
 		hasContent := false
-		for s := 0; s < pat.Tracks[t].Length; s++ {
-			if pat.Tracks[t].Steps[s].Active {
+		for step := 0; step < pat.Tracks[t].Length; step++ {
+			if pat.Tracks[t].Steps[step].Active {
 				hasContent = true
 				break
 			}
 		}
 
 		var color [3]uint8
-		if t == d.selected {
-			color = trackSelected // white
+		if t == s.Selected {
+			color = trackSelected
 		} else if hasContent {
-			color = trackHasContent // purple
+			color = trackHasContent
 		} else {
-			color = trackEmpty // dim
+			color = trackEmpty
 		}
 
 		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: midi.ChannelStatic})
@@ -317,41 +236,42 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 }
 
 func (d *DrumDevice) HandleKey(key string) {
-	pat := d.patterns[d.editing]
-	track := &pat.Tracks[d.selected]
+	s := d.state
+	pat := &s.Patterns[s.Editing]
+	track := &pat.Tracks[s.Selected]
 
 	switch key {
 	case "h", "left":
-		if d.cursor > 0 {
-			d.cursor--
+		if s.Cursor > 0 {
+			s.Cursor--
 		}
 	case "l", "right":
-		if d.cursor < track.Length-1 {
-			d.cursor++
+		if s.Cursor < track.Length-1 {
+			s.Cursor++
 		}
 	case " ":
-		if d.cursor < track.Length {
-			track.Steps[d.cursor].Active = !track.Steps[d.cursor].Active
+		if s.Cursor < track.Length {
+			track.Steps[s.Cursor].Active = !track.Steps[s.Cursor].Active
 		}
 	case "j", "down":
-		if d.selected < 15 {
-			d.selected++
-			if d.cursor >= d.patterns[d.editing].Tracks[d.selected].Length {
-				d.cursor = d.patterns[d.editing].Tracks[d.selected].Length - 1
+		if s.Selected < 15 {
+			s.Selected++
+			if s.Cursor >= s.Patterns[s.Editing].Tracks[s.Selected].Length {
+				s.Cursor = s.Patterns[s.Editing].Tracks[s.Selected].Length - 1
 			}
 		}
 	case "k", "up":
-		if d.selected > 0 {
-			d.selected--
-			if d.cursor >= d.patterns[d.editing].Tracks[d.selected].Length {
-				d.cursor = d.patterns[d.editing].Tracks[d.selected].Length - 1
+		if s.Selected > 0 {
+			s.Selected--
+			if s.Cursor >= s.Patterns[s.Editing].Tracks[s.Selected].Length {
+				s.Cursor = s.Patterns[s.Editing].Tracks[s.Selected].Length - 1
 			}
 		}
 	case "[":
 		if track.Length > 1 {
 			track.Length--
-			if d.cursor >= track.Length {
-				d.cursor = track.Length - 1
+			if s.Cursor >= track.Length {
+				s.Cursor = track.Length - 1
 			}
 		}
 	case "]":
@@ -359,47 +279,46 @@ func (d *DrumDevice) HandleKey(key string) {
 			track.Length++
 		}
 	case "c":
-		for s := 0; s < 32; s++ {
-			track.Steps[s].Active = false
+		for step := 0; step < 32; step++ {
+			track.Steps[step].Active = false
 		}
 	case "<", ",":
-		if d.editing > 0 {
-			d.editing--
+		if s.Editing > 0 {
+			s.Editing--
 		}
 	case ">", ".":
-		if d.editing < NumPatterns-1 {
-			d.editing++
+		if s.Editing < NumPatterns-1 {
+			s.Editing++
 		}
 	}
 }
 
 func (d *DrumDevice) HandlePad(row, col int) {
-	pat := d.patterns[d.editing]
+	s := d.state
+	pat := &s.Patterns[s.Editing]
 
-	// Top 4 rows (rows 4-7): step toggle
+	// Top 4 rows: step toggle
 	if row >= 4 && row <= 7 {
 		stepIdx := (7-row)*8 + col
-		track := &pat.Tracks[d.selected]
+		track := &pat.Tracks[s.Selected]
 		if stepIdx < track.Length {
 			track.Steps[stepIdx].Active = !track.Steps[stepIdx].Active
-			d.cursor = stepIdx
+			s.Cursor = stepIdx
 		}
 		return
 	}
 
-	// Bottom-left 4x4 (rows 0-3, cols 0-3): track select
+	// Bottom-left 4x4: track select
 	if row < 4 && col < 4 {
 		trackIdx := row*4 + col
 		if trackIdx < 16 {
-			d.selected = trackIdx
-			if d.cursor >= pat.Tracks[d.selected].Length {
-				d.cursor = pat.Tracks[d.selected].Length - 1
+			s.Selected = trackIdx
+			if s.Cursor >= pat.Tracks[s.Selected].Length {
+				s.Cursor = pat.Tracks[s.Selected].Length - 1
 			}
 		}
 		return
 	}
-
-	// Bottom-right 4x4: commands (TODO)
 }
 
 func (d *DrumDevice) HelpLayout() widgets.LaunchpadLayout {

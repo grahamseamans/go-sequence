@@ -8,23 +8,21 @@ import (
 	"go-sequence/midi"
 
 	gomidi "gitlab.com/gomidi/midi/v2"
-	"gitlab.com/gomidi/midi/v2/drivers"
 )
 
 // Manager orchestrates sequencer playback and device management
 type Manager struct {
+	devices  [8]Device
 	session  *SessionDevice
 	settings *SettingsDevice
-	tracks   []*Track // tracks own devices and MIDI channel assignments
 
-	outPort drivers.Out
-	send    func(msg gomidi.Message) error
+	// Multi-port MIDI output
+	defaultPort string
+	senders     map[string]func(gomidi.Message) error
+	sendersMu   sync.RWMutex
 
 	controller midi.Controller
 
-	step     int
-	tempo    int
-	playing  bool
 	stopChan chan struct{}
 	mu       sync.Mutex
 
@@ -37,10 +35,110 @@ type Manager struct {
 // NewManager creates a new sequencer manager
 func NewManager() *Manager {
 	return &Manager{
-		tempo:      120,
-		tracks:     make([]*Track, 0),
+		senders:    make(map[string]func(gomidi.Message) error),
 		UpdateChan: make(chan struct{}, 1),
 	}
+}
+
+// SetDevice assigns a device to a slot
+func (m *Manager) SetDevice(idx int, d Device) {
+	if idx >= 0 && idx < 8 {
+		m.devices[idx] = d
+	}
+}
+
+// GetDevice returns the device at a slot
+func (m *Manager) GetDevice(idx int) Device {
+	if idx >= 0 && idx < 8 {
+		return m.devices[idx]
+	}
+	return nil
+}
+
+// Devices returns the devices array
+func (m *Manager) Devices() [8]Device {
+	return m.devices
+}
+
+// CreateDrumDevice creates a DrumDevice wired to the given track's state
+func (m *Manager) CreateDrumDevice(trackIdx int) Device {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return nil
+	}
+	ts := S.Tracks[trackIdx]
+	if ts.Drum == nil {
+		ts.Drum = NewDrumState()
+	}
+	ts.Type = DeviceTypeDrum
+	ts.Piano = nil // clear other device state
+	return NewDrumDevice(ts.Drum)
+}
+
+// CreatePianoDevice creates a PianoRollDevice wired to the given track's state
+func (m *Manager) CreatePianoDevice(trackIdx int) Device {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return nil
+	}
+	ts := S.Tracks[trackIdx]
+	if ts.Piano == nil {
+		ts.Piano = NewPianoState()
+	}
+	ts.Type = DeviceTypePiano
+	ts.Drum = nil // clear other device state
+	return NewPianoRollDevice(ts.Piano)
+}
+
+// CreateEmptyDevice creates an EmptyDevice for the given track
+func (m *Manager) CreateEmptyDevice(trackIdx int) Device {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return nil
+	}
+	ts := S.Tracks[trackIdx]
+	ts.Type = DeviceTypeNone
+	ts.Drum = nil
+	ts.Piano = nil
+	return NewEmptyDevice(trackIdx + 1)
+}
+
+// SetDefaultPort sets the default MIDI output port name
+func (m *Manager) SetDefaultPort(portName string) {
+	m.defaultPort = portName
+}
+
+// getSender returns a sender for the given port name, lazily opening it
+func (m *Manager) getSender(portName string) func(gomidi.Message) error {
+	if portName == "" {
+		return nil
+	}
+
+	m.sendersMu.RLock()
+	if sender, ok := m.senders[portName]; ok {
+		m.sendersMu.RUnlock()
+		return sender
+	}
+	m.sendersMu.RUnlock()
+
+	// Open port
+	m.sendersMu.Lock()
+	defer m.sendersMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if sender, ok := m.senders[portName]; ok {
+		return sender
+	}
+
+	// Find and open port
+	for _, port := range gomidi.GetOutPorts() {
+		if port.String() == portName {
+			sender, err := gomidi.SendTo(port)
+			if err != nil {
+				return nil
+			}
+			m.senders[portName] = sender
+			return sender
+		}
+	}
+	return nil
 }
 
 // SetController sets the MIDI controller for LED feedback
@@ -52,25 +150,6 @@ func (m *Manager) SetController(c midi.Controller) {
 			m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
 		}
 	}
-}
-
-// AddTrack creates a new track with the given name and MIDI channel.
-func (m *Manager) AddTrack(name string, channel uint8) *Track {
-	t := NewTrack(name, channel)
-	m.tracks = append(m.tracks, t)
-	return t
-}
-
-// SetTrackDevice assigns a device to a track by index.
-func (m *Manager) SetTrackDevice(idx int, d Device) {
-	if idx >= 0 && idx < len(m.tracks) {
-		m.tracks[idx].Device = d
-	}
-}
-
-// Tracks returns the list of tracks.
-func (m *Manager) Tracks() []*Track {
-	return m.tracks
 }
 
 // SetSession sets the session device
@@ -96,29 +175,14 @@ func (m *Manager) FocusSettings() {
 	}
 }
 
-// OpenMIDI opens a MIDI output port for note output
-func (m *Manager) OpenMIDI(portIndex int) error {
-	outs := gomidi.GetOutPorts()
-	if portIndex < 0 || portIndex >= len(outs) {
-		return nil
-	}
-	m.outPort = outs[portIndex]
-	send, err := gomidi.SendTo(m.outPort)
-	if err != nil {
-		return err
-	}
-	m.send = send
-	return nil
-}
-
 // Play starts playback
 func (m *Manager) Play() {
 	m.mu.Lock()
-	if m.playing {
+	if S.Playing {
 		m.mu.Unlock()
 		return
 	}
-	m.playing = true
+	S.Playing = true
 	m.stopChan = make(chan struct{})
 	m.mu.Unlock()
 
@@ -129,10 +193,10 @@ func (m *Manager) Play() {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.playing {
+	if !S.Playing {
 		return
 	}
-	m.playing = false
+	S.Playing = false
 	close(m.stopChan)
 }
 
@@ -142,7 +206,7 @@ func (m *Manager) tickLoop() {
 
 	// Capture tempo at start (changes apply on next play)
 	m.mu.Lock()
-	tempo := m.tempo
+	tempo := S.Tempo
 	m.mu.Unlock()
 
 	// Calculate step duration (16th notes)
@@ -157,59 +221,71 @@ func (m *Manager) tickLoop() {
 			return
 		case <-ticker.C:
 			m.mu.Lock()
-			if !m.playing {
+			if !S.Playing {
 				m.mu.Unlock()
 				return
 			}
-			step := m.step
+			step := S.Step
 			m.mu.Unlock()
 
-			// 1. Tick all tracks → collect MIDI events with track's channel
-			var events []midi.Event
-			for _, track := range m.tracks {
-				if track.Device == nil || track.Muted {
+			// 1. Tick all devices → send MIDI events per-device port
+			for i, dev := range m.devices {
+				if dev == nil {
 					continue
 				}
-				devEvents := track.Device.Tick(step)
-				for _, e := range devEvents {
-					e.Channel = track.Channel // use track's MIDI channel
-					events = append(events, e)
+				ts := S.Tracks[i]
+				if ts.Muted {
+					continue
 				}
-			}
 
-			// 2. Send MIDI events (channel already set from track)
-			if m.send != nil {
+				events := dev.Tick(step)
+				if len(events) == 0 {
+					continue
+				}
+
+				// Determine which port to use
+				portName := ts.PortName
+				if portName == "" {
+					portName = m.defaultPort
+				}
+				sender := m.getSender(portName)
+				if sender == nil {
+					continue
+				}
+
+				// Send events
 				for _, e := range events {
+					e.Channel = ts.Channel
 					switch e.Type {
 					case midi.NoteOn:
-						m.send(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
+						sender(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
 						// Schedule note off
-						go func(ch, note uint8) {
+						go func(s func(gomidi.Message) error, ch, note uint8) {
 							time.Sleep(stepDuration * 80 / 100)
-							m.send(gomidi.NoteOff(ch, note))
-						}(e.Channel, e.Note)
+							s(gomidi.NoteOff(ch, note))
+						}(sender, e.Channel, e.Note)
 					case midi.NoteOff:
-						m.send(gomidi.NoteOff(e.Channel, e.Note))
+						sender(gomidi.NoteOff(e.Channel, e.Note))
 					}
 				}
 			}
 
-			// 3. Update LEDs on focused device
+			// 2. Update LEDs on focused device
 			if m.focused != nil && m.controller != nil {
 				for _, led := range m.focused.RenderLEDs() {
 					m.controller.SetLEDRGB(led.Row, led.Col, led.Color, led.Channel)
 				}
 			}
 
-			// 4. Notify TUI
+			// 3. Notify TUI
 			select {
 			case m.UpdateChan <- struct{}{}:
 			default:
 			}
 
-			// 5. Advance step
+			// 4. Advance step
 			m.mu.Lock()
-			m.step = (m.step + 1) % 16
+			S.Step = (S.Step + 1) % 16
 			m.mu.Unlock()
 		}
 	}
@@ -225,14 +301,14 @@ func (m *Manager) SetTempo(bpm int) {
 	if bpm > 300 {
 		bpm = 300
 	}
-	m.tempo = bpm
+	S.Tempo = bpm
 }
 
 // GetState returns the current sequencer state
 func (m *Manager) GetState() (step int, playing bool, tempo int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.step, m.playing, m.tempo
+	return S.Step, S.Playing, S.Tempo
 }
 
 // Focus management
@@ -258,10 +334,10 @@ func (m *Manager) FocusSession() {
 	m.SetFocused(m.session)
 }
 
-// FocusDevice focuses a device by track index (works for any device including empty)
+// FocusDevice focuses a device by index
 func (m *Manager) FocusDevice(idx int) {
-	if idx >= 0 && idx < len(m.tracks) && m.tracks[idx].Device != nil {
-		m.SetFocused(m.tracks[idx].Device)
+	if idx >= 0 && idx < 8 && m.devices[idx] != nil {
+		m.SetFocused(m.devices[idx])
 	}
 }
 
@@ -304,15 +380,4 @@ func (m *Manager) View() string {
 		return m.focused.View()
 	}
 	return ""
-}
-
-// Devices returns all non-nil devices from tracks (for backward compatibility)
-func (m *Manager) Devices() []Device {
-	var devices []Device
-	for _, t := range m.tracks {
-		if t.Device != nil {
-			devices = append(devices, t.Device)
-		}
-	}
-	return devices
 }

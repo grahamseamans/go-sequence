@@ -27,10 +27,6 @@ func (e *EmptyDevice) QueuePattern(p int) (pattern, next int) {
 	return 0, 0
 }
 
-func (e *EmptyDevice) GetState() (pattern, next int) {
-	return 0, 0
-}
-
 func (e *EmptyDevice) ContentMask() []bool {
 	return make([]bool, NumPatterns)
 }
