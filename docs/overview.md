@@ -39,19 +39,21 @@ MIDI sequencer/arranger. Not a DAW. A MIDI brain.
         Hardware synths, Pd, etc.
 ```
 
-## Internal MIDI Channels
+## MIDI Routing
 
-All MIDI inside the system uses internal channels = device index.
+Each track has its own MIDI channel and output port, configured in the Settings device (`,` key).
 
 ```
-Channel 0 = SessionDevice
-Channel 1 = Device 1
-Channel 2 = Device 2
+Track 1 → Channel 1 → IAC Driver (Bitwig)
+Track 2 → Channel 2 → IAC Driver (Bitwig)
+Track 3 → Channel 10 → Hardware Interface (drum machine)
 ...
-Channel 8 = Device 8
 ```
 
-External MIDI channels are configurable per device. Translation happens once, at the very end before sending to hardware.
+Routing config lives in the state singleton `S.Tracks[i]`:
+- `.Channel` - MIDI channel (1-16)
+- `.PortName` - MIDI output port ("" = default)
+- `.Muted` - skip this track
 
 ## Devices
 
@@ -84,14 +86,20 @@ SessionDevice is focused by default (clip launcher view). Switch focus to edit a
 ```
 go-sequence/
 ├── main.go
-├── manager.go        # Manager, tick loop, routing
-├── device.go         # Device interface
-├── devices/
-│   ├── session.go
-│   ├── drum.go
-│   ├── pianoroll.go
-│   └── ...
-├── controller.go     # Launchpad MIDI I/O
-├── midi.go           # MIDIEvent, MIDIOut
-└── tui.go            # bubbletea, routes to focused device
+├── sequencer/
+│   ├── state.go      # State singleton (S), TrackState, DrumState, PianoState
+│   ├── device.go     # Device interface
+│   ├── manager.go    # Manager, tick loop, multi-port routing
+│   ├── session.go    # SessionDevice (clip launcher)
+│   ├── settings.go   # SettingsDevice (track config UI)
+│   ├── drum.go       # DrumDevice
+│   ├── pianoroll.go  # PianoRollDevice
+│   └── empty.go      # EmptyDevice
+├── midi/
+│   ├── controller.go # Launchpad interface
+│   └── launchpad.go  # Launchpad X implementation
+├── tui/
+│   └── model.go      # bubbletea, routes to focused device
+└── config/
+    └── config.go     # YAML config loading
 ```

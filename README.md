@@ -23,7 +23,7 @@ Working: Drum sequencer (16 sounds, 32 steps, variable length), piano roll (note
 - [x] Show playing vs queued
 - [x] Show empty vs has-content patterns
 - [x] Track-based with MIDI channel per track
-- [ ] UI to change track channel/device assignment
+- [x] UI to change track channel/device/output (Settings device, press `,`)
 - [ ] Scene launch (whole row at once)
 - [ ] Stop clip on device
 
@@ -69,8 +69,8 @@ The piano roll is for **editing notes you play in** via MIDI keyboard - not for 
 ### MIDI
 - [x] Note-off tracking (piano roll tracks held notes)
 - [x] Per-track MIDI channel output
-- [ ] Multiple MIDI output ports
-- [ ] Channel mapping UI
+- [x] Multiple MIDI output ports (per-track routing in Settings)
+- [x] Channel mapping UI (Settings device)
 
 ### Save/Load
 - [ ] Save project to file

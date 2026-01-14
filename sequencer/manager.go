@@ -255,17 +255,18 @@ func (m *Manager) tickLoop() {
 
 				// Send events
 				for _, e := range events {
-					e.Channel = ts.Channel
+					// ts.Channel is 1-16 (user-facing), MIDI protocol uses 0-15
+					midiCh := ts.Channel - 1
 					switch e.Type {
 					case midi.NoteOn:
-						sender(gomidi.NoteOn(e.Channel, e.Note, e.Velocity))
+						sender(gomidi.NoteOn(midiCh, e.Note, e.Velocity))
 						// Schedule note off
 						go func(s func(gomidi.Message) error, ch, note uint8) {
 							time.Sleep(stepDuration * 80 / 100)
 							s(gomidi.NoteOff(ch, note))
-						}(sender, e.Channel, e.Note)
+						}(sender, midiCh, e.Note)
 					case midi.NoteOff:
-						sender(gomidi.NoteOff(e.Channel, e.Note))
+						sender(gomidi.NoteOff(midiCh, e.Note))
 					}
 				}
 			}
