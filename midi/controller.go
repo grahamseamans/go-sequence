@@ -22,6 +22,13 @@ type NoteEvent struct {
 	Channel  uint8
 }
 
+// LEDUpdate represents a single LED change for batch updates
+type LEDUpdate struct {
+	Row, Col int
+	Color    [3]uint8
+	Channel  uint8
+}
+
 // Controller is the interface for MIDI input devices
 type Controller interface {
 	ID() string
@@ -32,9 +39,8 @@ type Controller interface {
 	NoteEvents() <-chan NoteEvent // For keyboards
 
 	// Output to the controller
-	SetLED(row, col int, color uint8, channel uint8) error
-	SetLEDRGB(row, col int, rgb [3]uint8, channel uint8) error // maps RGB to palette
-	ClearLEDs() error
+	SetLEDRGB(row, col int, rgb [3]uint8, channel uint8) error
+	SetLEDBatch(updates []LEDUpdate) error // batch update - one MIDI message
 
 	// Lifecycle
 	Close() error

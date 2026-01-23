@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"go-sequence/config"
+	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/sequencer"
 	"go-sequence/theme"
@@ -14,7 +15,14 @@ import (
 )
 
 func main() {
+	fmt.Println("starting...")
+
+	// Enable debug logging
+	debug.Enable()
+	defer debug.Disable()
+
 	// Load config
+	fmt.Println("loading config...")
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Printf("Warning: could not load config: %v\n", err)
@@ -22,10 +30,12 @@ func main() {
 	}
 
 	// Load theme
+	fmt.Println("loading theme...")
 	palette := theme.MustLoadGPL("palettes/plasma.gpl")
 	th := theme.New(palette)
 
 	// Create sequencer manager
+	fmt.Println("creating sequencer...")
 	manager := sequencer.NewManager()
 
 	// Assign devices to slots
@@ -45,10 +55,17 @@ func main() {
 	settings := sequencer.NewSettingsDevice(manager)
 	manager.SetSettings(settings)
 
+	// Create save device
+	saveDevice := sequencer.NewSaveDevice(manager)
+	manager.SetSave(saveDevice)
+
 	// Create MIDI device manager
+	fmt.Println("initializing MIDI...")
 	deviceMgr := midi.NewDeviceManager()
 
 	// Try to connect to controller once on startup (with timeout, won't hang)
+	fmt.Println("connecting controller...")
+	fmt.Println("")
 	fmt.Println("go-sequence")
 	if err := deviceMgr.Connect(cfg); err != nil {
 		fmt.Printf("No controller: %v\n", err)

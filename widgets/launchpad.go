@@ -7,62 +7,45 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// PadConfig describes how a single pad should appear
-type PadConfig struct {
-	Color   [3]uint8
-	Tooltip string // used for legend grouping
+// RenderPad renders a single colored pad
+func RenderPad(color [3]uint8) string {
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(rgbToHex(color)))
+	return style.Render("■")
 }
 
-// LaunchpadLayout is provided by devices to configure the display
-type LaunchpadLayout struct {
-	TopRow   [8]PadConfig
-	Grid     [8][8]PadConfig
-	RightCol [8]PadConfig
-}
-
-// Zone describes a region of the Launchpad for the legend
-type Zone struct {
-	Name  string
-	Color [3]uint8
-	Desc  string
-}
-
-// RenderLaunchpad returns a colored ASCII representation of the Launchpad
-func RenderLaunchpad(layout LaunchpadLayout) string {
-	var lines []string
-
-	// Top row
-	var top strings.Builder
-	for col := 0; col < 8; col++ {
-		top.WriteString(renderPad(layout.TopRow[col].Color))
-		top.WriteString(" ")
+// RenderPadRow renders a row of colored pads with spacing
+func RenderPadRow(colors [][3]uint8) string {
+	var out strings.Builder
+	for i, c := range colors {
+		if i > 0 {
+			out.WriteString(" ")
+		}
+		out.WriteString(RenderPad(c))
 	}
-	lines = append(lines, top.String())
+	return out.String()
+}
 
-	// 8x8 grid + right column (row 7 at top, row 0 at bottom)
+// RenderPadGrid renders an 8x8 grid of pads (row 0 at bottom, row 7 at top)
+// Optional rightCol adds a 9th column (scene buttons)
+func RenderPadGrid(grid [8][8][3]uint8, rightCol *[8][3]uint8) string {
+	var lines []string
 	for row := 7; row >= 0; row-- {
 		var line strings.Builder
 		for col := 0; col < 8; col++ {
-			line.WriteString(renderPad(layout.Grid[row][col].Color))
+			line.WriteString(RenderPad(grid[row][col]))
 			line.WriteString(" ")
 		}
-		// Right column
-		line.WriteString(renderPad(layout.RightCol[row].Color))
+		if rightCol != nil {
+			line.WriteString(RenderPad(rightCol[row]))
+		}
 		lines = append(lines, line.String())
 	}
-
 	return strings.Join(lines, "\n")
 }
 
-// RenderLegend returns a color-coordinated legend for the zones
-func RenderLegend(zones []Zone) string {
-	var lines []string
-	for _, z := range zones {
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(rgbToHex(z.Color)))
-		pad := style.Render("■")
-		lines = append(lines, fmt.Sprintf("  %s %s - %s", pad, z.Name, z.Desc))
-	}
-	return strings.Join(lines, "\n")
+// RenderLegendItem renders a single legend item: "■ Name - description"
+func RenderLegendItem(color [3]uint8, name, desc string) string {
+	return fmt.Sprintf("  %s %s - %s", RenderPad(color), name, desc)
 }
 
 // RenderKeyHelp formats key bindings in a friendly way
@@ -89,11 +72,6 @@ type KeySection struct {
 type KeyBinding struct {
 	Key  string
 	Desc string
-}
-
-func renderPad(color [3]uint8) string {
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(rgbToHex(color)))
-	return style.Render("■")
 }
 
 func rgbToHex(c [3]uint8) string {

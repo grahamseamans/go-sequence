@@ -2,10 +2,15 @@ package midi
 
 import (
 	"fmt"
+	"sync/atomic"
+
+	"go-sequence/debug"
 
 	gomidi "gitlab.com/gomidi/midi/v2"
 	"gitlab.com/gomidi/midi/v2/drivers"
 )
+
+var ledSendCount uint64
 
 // LaunchpadController handles a Novation Launchpad X
 type LaunchpadController struct {
@@ -84,9 +89,6 @@ func NewLaunchpadController(id string, inPort drivers.In, outPort drivers.Out) (
 		lp.stopFunc = stop
 	}
 
-	// Clear all LEDs
-	lp.ClearLEDs()
-
 	return lp, nil
 }
 
@@ -106,17 +108,38 @@ func (lp *LaunchpadController) NoteEvents() <-chan NoteEvent {
 	return lp.noteChan // Launchpad doesn't send note events in the keyboard sense
 }
 
-func (lp *LaunchpadController) SetLED(row, col int, color uint8, channel uint8) error {
+func (lp *LaunchpadController) SetLEDRGB(row, col int, rgb [3]uint8, channel uint8) error {
 	if lp.send == nil {
 		return nil
 	}
 	note := rowColToNote(row, col)
+	color := mapRGBToLaunchpad(rgb)
+	atomic.AddUint64(&ledSendCount, 1)
 	return lp.send(gomidi.NoteOn(channel, note, color))
 }
 
-func (lp *LaunchpadController) SetLEDRGB(row, col int, rgb [3]uint8, channel uint8) error {
-	color := mapRGBToLaunchpad(rgb)
-	return lp.SetLED(row, col, color, channel)
+// SetLEDBatch sends multiple LED updates using individual NoteOn messages
+// (SysEx batching had color issues - this is simpler and still benefits from
+// the caller batching logic which reduces redundant updates)
+func (lp *LaunchpadController) SetLEDBatch(updates []LEDUpdate) error {
+	if lp.send == nil || len(updates) == 0 {
+		return nil
+	}
+
+	for _, u := range updates {
+		note := rowColToNote(u.Row, u.Col)
+		color := mapRGBToLaunchpad(u.Color)
+		lp.send(gomidi.NoteOn(u.Channel, note, color))
+	}
+
+	atomic.AddUint64(&ledSendCount, uint64(len(updates)))
+
+	count := atomic.LoadUint64(&ledSendCount)
+	if count%100 < uint64(len(updates)) {
+		debug.Log("lp-send", "batch count=%d (this batch=%d)", count, len(updates))
+	}
+
+	return nil
 }
 
 // mapRGBToLaunchpad finds the nearest Launchpad X palette color for an RGB value
@@ -165,30 +188,19 @@ func mapRGBToLaunchpad(rgb [3]uint8) uint8 {
 	return bestMatch
 }
 
-func (lp *LaunchpadController) ClearLEDs() error {
-	if lp.send == nil {
-		return nil
-	}
-	// Clear 8x8 main grid
-	for row := range 8 {
-		for col := range 8 {
-			lp.SetLED(row, col, ColorOff, 0)
-		}
-	}
-	// Clear right side column (col 8)
-	for row := range 8 {
-		lp.SetLED(row, 8, ColorOff, 0)
-	}
-	// Clear top row (row 8)
-	for col := range 8 {
-		lp.SetLED(8, col, ColorOff, 0)
-	}
-	return nil
-}
-
 func (lp *LaunchpadController) Close() error {
+	// Clear all LEDs on close via batch
 	if lp.send != nil {
-		lp.ClearLEDs()
+		var updates []LEDUpdate
+		for row := 0; row < 9; row++ {
+			for col := 0; col < 9; col++ {
+				if row == 8 && col == 8 {
+					continue // no LED at 8,8
+				}
+				updates = append(updates, LEDUpdate{Row: row, Col: col, Color: [3]uint8{0, 0, 0}})
+			}
+		}
+		lp.SetLEDBatch(updates)
 	}
 	if lp.stopFunc != nil {
 		lp.stopFunc()

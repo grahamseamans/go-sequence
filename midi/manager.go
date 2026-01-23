@@ -32,7 +32,8 @@ const (
 
 // DeviceManager handles MIDI controller connections (no polling - user-initiated only)
 type DeviceManager struct {
-	controller Controller
+	controller Controller // Launchpad (special control surface)
+	noteInput  Controller // MIDI keyboard for recording
 	mu         sync.RWMutex
 	timeout    time.Duration
 }
@@ -49,6 +50,63 @@ func (dm *DeviceManager) GetController() Controller {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
 	return dm.controller
+}
+
+// GetNoteInput returns the currently connected note input (or nil)
+func (dm *DeviceManager) GetNoteInput() Controller {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	return dm.noteInput
+}
+
+// ConnectNoteInput connects to a MIDI keyboard for recording
+func (dm *DeviceManager) ConnectNoteInput(portName string) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	// Close existing if any
+	if dm.noteInput != nil {
+		dm.noteInput.Close()
+		dm.noteInput = nil
+	}
+
+	if portName == "" {
+		return nil // Just disconnect
+	}
+
+	// Find the port
+	inPorts := gomidi.GetInPorts()
+	var inPort drivers.In
+	for _, p := range inPorts {
+		if p.String() == portName {
+			inPort = p
+			break
+		}
+	}
+
+	if inPort == nil {
+		return fmt.Errorf("MIDI input port not found: %s", portName)
+	}
+
+	// Create keyboard controller for note input
+	ctrl, err := NewKeyboardController(portName, inPort)
+	if err != nil {
+		return err
+	}
+
+	dm.noteInput = ctrl
+	return nil
+}
+
+// DisconnectNoteInput closes the note input
+func (dm *DeviceManager) DisconnectNoteInput() {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if dm.noteInput != nil {
+		dm.noteInput.Close()
+		dm.noteInput = nil
+	}
 }
 
 // Connect attempts to connect to a controller (with timeout)

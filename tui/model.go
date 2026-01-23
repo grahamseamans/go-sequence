@@ -32,6 +32,10 @@ type RescanResultMsg struct {
 	midiOutputs []string
 }
 
+type NoteInputResultMsg struct {
+	err error
+}
+
 func NewModel(manager *sequencer.Manager, deviceMgr *midi.DeviceManager, cfg *config.Config, th *theme.Theme) Model {
 	controller := deviceMgr.GetController()
 	m := Model{
@@ -64,12 +68,23 @@ func RescanDevices(deviceMgr *midi.DeviceManager, cfg *config.Config) tea.Cmd {
 	}
 }
 
+func ConnectNoteInput(deviceMgr *midi.DeviceManager, portName string) tea.Cmd {
+	return func() tea.Msg {
+		err := deviceMgr.ConnectNoteInput(portName)
+		return NoteInputResultMsg{err: err}
+	}
+}
+
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	cmds = append(cmds, ListenForUpdates(m.Manager))
 
 	if m.controller != nil {
 		cmds = append(cmds, m.listenForPads())
+	}
+
+	if m.DeviceMgr.GetNoteInput() != nil {
+		cmds = append(cmds, m.listenForNotes())
 	}
 
 	return tea.Batch(cmds...)
@@ -87,16 +102,35 @@ func (m Model) listenForPads() tea.Cmd {
 	}
 }
 
+func (m Model) listenForNotes() tea.Cmd {
+	noteInput := m.DeviceMgr.GetNoteInput()
+	if noteInput == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		for note := range noteInput.NoteEvents() {
+			m.Manager.HandleNote(note.Note, note.Velocity)
+		}
+		return nil
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// If save device is in input mode, route all keys there
+		if save := m.Manager.GetSave(); save != nil && save.IsInputMode() {
+			m.Manager.HandleKey(msg.String())
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "Q", "ctrl+c":
 			m.quitting = true
 			m.Manager.Stop()
 			return m, tea.Quit
 
-		case "p":
+		case "P": // Shift+P - play/stop
 			_, playing, _ := m.Manager.GetState()
 			if playing {
 				m.Manager.Stop()
@@ -120,6 +154,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.Manager.HandleKey(msg.String())
 
+		case "R": // Shift+R - toggle recording (only while playing)
+			_, playing, _ := m.Manager.GetState()
+			if playing {
+				m.Manager.ToggleRecording()
+			}
+
+		case "p": // preview/thru for focused device
+			m.Manager.TogglePreview()
+
+		case "S": // Shift+S - quick save
+			projectName := sequencer.S.ProjectName
+			if projectName == "" {
+				projectName = "untitled"
+			}
+			if err := sequencer.SaveProject(projectName); err != nil {
+				m.statusMsg = fmt.Sprintf("Save failed: %v", err)
+			} else {
+				m.statusMsg = fmt.Sprintf("Saved to %s", projectName)
+			}
+
+		case "D": // Shift+D - save device
+			m.Manager.FocusSave()
+
 		case "0":
 			m.Manager.FocusSession()
 
@@ -132,6 +189,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		default:
 			m.Manager.HandleKey(msg.String())
+			// Check if settings changed note input
+			if settings := m.Manager.GetSettings(); settings != nil && settings.NoteInputChanged {
+				settings.NoteInputChanged = false
+				return m, ConnectNoteInput(m.DeviceMgr, sequencer.S.NoteInputPort)
+			}
 		}
 
 	case UpdateMsg:
@@ -152,6 +214,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.controller = msg.controller
 			m.Manager.SetController(msg.controller)
 			return m, m.listenForPads()
+		}
+
+	case NoteInputResultMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("Note input error: %v", msg.err)
+		} else if m.DeviceMgr.GetNoteInput() != nil {
+			m.statusMsg = "Note input connected"
+			return m, m.listenForNotes()
+		} else {
+			m.statusMsg = "Note input disconnected"
 		}
 	}
 
@@ -184,7 +256,7 @@ func (m Model) View() string {
 	// Header block
 	title := titleStyle.Render("go-sequence")
 	status := fmt.Sprintf("  %s  %3d bpm  step %02d  [%s]", playState, tempo, step+1, ctrlStatus)
-	controls := dimStyle.Render("p:play  +/-:tempo  0:session  1-8:device  ,:settings  r:rescan  q:quit")
+	controls := dimStyle.Render("P:play  +/-:tempo  0:session  1-8:device  ,:settings  S:save  D:browser  Q:quit")
 	border := borderStyle.Render("════════════════════════════════════════════════════════════════")
 
 	// Device view (includes grid, key help, and launchpad)

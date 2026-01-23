@@ -16,7 +16,9 @@ const (
 	PopupDeviceType
 	PopupChannel
 	PopupOutput
+	PopupKit
 	PopupConfirm
+	PopupNoteInput
 )
 
 // PopupState holds the state of an open popup
@@ -33,7 +35,7 @@ type SettingsDevice struct {
 	manager *Manager // reference for device access and creation
 
 	// Cursor position
-	cursorRow int // 0-7 for tracks
+	cursorRow int // 0-7 for tracks, 8 for note input
 	cursorCol int // 0=device, 1=channel, 2=output
 
 	// Popup state
@@ -42,6 +44,9 @@ type SettingsDevice struct {
 	// Available MIDI ports (cached from last scan)
 	midiInputs  []string
 	midiOutputs []string
+
+	// Flag to signal TUI that note input changed (checked after HandleKey)
+	NoteInputChanged bool
 }
 
 // NewSettingsDevice creates a settings device
@@ -77,14 +82,19 @@ func (s *SettingsDevice) HandleMIDI(event midi.Event) {
 	// Could use this for "learn" functionality later
 }
 
+func (s *SettingsDevice) ToggleRecording() {}
+func (s *SettingsDevice) TogglePreview()   {}
+func (s *SettingsDevice) IsRecording() bool { return false }
+func (s *SettingsDevice) IsPreviewing() bool { return false }
+
 func (s *SettingsDevice) View() string {
 	var out strings.Builder
 
 	out.WriteString("SETTINGS  Track & MIDI Configuration\n\n")
 
 	// Track table header
-	out.WriteString("Track   Device       Channel   Output\n")
-	out.WriteString("─────────────────────────────────────────────────\n")
+	out.WriteString("Track   Device       Channel   Output         Kit\n")
+	out.WriteString("────────────────────────────────────────────────────────────\n")
 
 	// Track rows
 	for i := 0; i < 8; i++ {
@@ -122,12 +132,43 @@ func (s *SettingsDevice) View() string {
 			outputStr = "-"
 		}
 		if s.cursorRow == i && s.cursorCol == 2 {
-			out.WriteString(fmt.Sprintf("[%-12s]", outputStr))
+			out.WriteString(fmt.Sprintf("[%-12s]  ", outputStr))
 		} else {
-			out.WriteString(fmt.Sprintf(" %-12s", outputStr))
+			out.WriteString(fmt.Sprintf(" %-12s   ", outputStr))
+		}
+
+		// Kit cell (only for drum devices)
+		kitStr := "-"
+		if ts.Type == DeviceTypeDrum {
+			kit := GetKit(ts.Kit)
+			kitStr = kit.Name
+			if len(kitStr) > 12 {
+				kitStr = kitStr[:12]
+			}
+		}
+		if s.cursorRow == i && s.cursorCol == 3 {
+			out.WriteString(fmt.Sprintf("[%-12s]", kitStr))
+		} else {
+			out.WriteString(fmt.Sprintf(" %-12s", kitStr))
 		}
 
 		out.WriteString("\n")
+	}
+
+	// Note Input selection row
+	out.WriteString("\n")
+	out.WriteString("─────────────────────────────────────────────────\n")
+	noteInputStr := "(none)"
+	if S.NoteInputPort != "" {
+		noteInputStr = S.NoteInputPort
+		if len(noteInputStr) > 30 {
+			noteInputStr = noteInputStr[:30]
+		}
+	}
+	if s.cursorRow == 8 {
+		out.WriteString(fmt.Sprintf("Note Input:  [%-30s]\n", noteInputStr))
+	} else {
+		out.WriteString(fmt.Sprintf("Note Input:   %-30s\n", noteInputStr))
 	}
 
 	// MIDI Inputs section
@@ -185,11 +226,7 @@ func (s *SettingsDevice) View() string {
 
 	// Launchpad
 	out.WriteString("\n\n")
-	out.WriteString(widgets.RenderLaunchpad(s.HelpLayout()))
-	out.WriteString("\n")
-	out.WriteString(widgets.RenderLegend([]widgets.Zone{
-		{Name: "Tracks", Color: [3]uint8{100, 100, 200}, Desc: "select track to configure"},
-	}))
+	out.WriteString(s.renderLaunchpadHelp())
 
 	return out.String()
 }
@@ -211,8 +248,12 @@ func (s *SettingsDevice) renderPopup() string {
 		title = "MIDI Channel"
 	case PopupOutput:
 		title = "MIDI Output"
+	case PopupKit:
+		title = "Drum Kit"
 	case PopupConfirm:
 		title = "Confirm"
+	case PopupNoteInput:
+		title = "Note Input"
 	}
 
 	// Top border
@@ -302,15 +343,15 @@ func (s *SettingsDevice) HandleKey(key string) {
 	// Normal navigation
 	switch key {
 	case "h", "left":
-		if s.cursorCol > 0 {
+		if s.cursorRow < 8 && s.cursorCol > 0 {
 			s.cursorCol--
 		}
 	case "l", "right":
-		if s.cursorCol < 2 {
+		if s.cursorRow < 8 && s.cursorCol < 3 {
 			s.cursorCol++
 		}
 	case "j", "down":
-		if s.cursorRow < 7 {
+		if s.cursorRow < 8 {
 			s.cursorRow++
 		}
 	case "k", "up":
@@ -323,6 +364,27 @@ func (s *SettingsDevice) HandleKey(key string) {
 }
 
 func (s *SettingsDevice) openPopupForCurrentCell() {
+	// Note Input row (row 8)
+	if s.cursorRow == 8 {
+		options := []string{"(none)"}
+		options = append(options, s.midiInputs...)
+		selected := 0
+		// Find current port in list
+		for i, port := range s.midiInputs {
+			if port == S.NoteInputPort {
+				selected = i + 1 // +1 because "(none)" is at index 0
+				break
+			}
+		}
+		s.popup = &PopupState{
+			Type:     PopupNoteInput,
+			Options:  options,
+			Selected: selected,
+		}
+		return
+	}
+
+	// Track rows (0-7)
 	switch s.cursorCol {
 	case 0: // Device type
 		s.popup = &PopupState{
@@ -362,6 +424,27 @@ func (s *SettingsDevice) openPopupForCurrentCell() {
 			Selected:   selected,
 			TrackIndex: s.cursorRow,
 		}
+	case 3: // Kit (only for drum devices)
+		ts := S.Tracks[s.cursorRow]
+		if ts.Type != DeviceTypeDrum {
+			return // Can't select kit for non-drum devices
+		}
+		kitNames := KitNames()
+		options := make([]string, len(kitNames))
+		selected := 0
+		for i, name := range kitNames {
+			kit := GetKit(name)
+			options[i] = kit.Name
+			if name == ts.Kit || (ts.Kit == "" && name == DefaultKit) {
+				selected = i
+			}
+		}
+		s.popup = &PopupState{
+			Type:       PopupKit,
+			Options:    options,
+			Selected:   selected,
+			TrackIndex: s.cursorRow,
+		}
 	}
 }
 
@@ -370,11 +453,9 @@ func (s *SettingsDevice) confirmPopupSelection() {
 		return
 	}
 
-	trackIdx := s.popup.TrackIndex
-	ts := S.Tracks[trackIdx]
-
 	switch s.popup.Type {
 	case PopupDeviceType:
+		trackIdx := s.popup.TrackIndex
 		// Check if track has content and we're changing type
 		currentType := s.getDeviceTypeName(trackIdx)
 		newType := s.popup.Options[s.popup.Selected]
@@ -416,14 +497,34 @@ func (s *SettingsDevice) confirmPopupSelection() {
 		}
 
 	case PopupChannel:
+		ts := S.Tracks[s.popup.TrackIndex]
 		ts.Channel = uint8(s.popup.Selected + 1)
 
 	case PopupOutput:
+		ts := S.Tracks[s.popup.TrackIndex]
 		if s.popup.Selected == 0 {
 			ts.PortName = "" // default
 		} else {
 			ts.PortName = s.midiOutputs[s.popup.Selected-1]
 		}
+
+	case PopupKit:
+		ts := S.Tracks[s.popup.TrackIndex]
+		kitNames := KitNames()
+		if s.popup.Selected >= 0 && s.popup.Selected < len(kitNames) {
+			ts.Kit = kitNames[s.popup.Selected]
+		}
+
+	case PopupNoteInput:
+		var portName string
+		if s.popup.Selected == 0 {
+			portName = "" // none
+		} else {
+			portName = s.midiInputs[s.popup.Selected-1]
+		}
+		S.NoteInputPort = portName
+		// Signal TUI to connect (TUI checks this flag after HandleKey)
+		s.NoteInputChanged = true
 	}
 
 	s.popup = nil
@@ -460,20 +561,33 @@ func (s *SettingsDevice) HandlePad(row, col int) {
 	}
 }
 
-func (s *SettingsDevice) HelpLayout() widgets.LaunchpadLayout {
+func (s *SettingsDevice) renderLaunchpadHelp() string {
 	trackColor := [3]uint8{100, 100, 200}
 	dimColor := [3]uint8{30, 30, 50}
 
-	var layout widgets.LaunchpadLayout
+	var grid [8][8][3]uint8
+	topRow := make([][3]uint8, 8)
+
+	// All dim by default
+	for i := 0; i < 8; i++ {
+		topRow[i] = dimColor
+	}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = dimColor
+		}
+	}
 
 	// Left column shows tracks
 	for row := 0; row < 8; row++ {
 		if S.Tracks[row].Type != DeviceTypeNone {
-			layout.Grid[row][0] = widgets.PadConfig{Color: trackColor, Tooltip: fmt.Sprintf("Track %d", row+1)}
-		} else {
-			layout.Grid[row][0] = widgets.PadConfig{Color: dimColor, Tooltip: fmt.Sprintf("Track %d (empty)", row+1)}
+			grid[row][0] = trackColor
 		}
 	}
 
-	return layout
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, nil) + "\n\n"
+	out += widgets.RenderLegendItem(trackColor, "Tracks", "select track to configure")
+
+	return out
 }

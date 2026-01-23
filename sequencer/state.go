@@ -9,10 +9,12 @@ func init() {
 
 // State is the single source of truth for all application state
 type State struct {
-	Tempo   int            `json:"tempo"`
-	Step    int            `json:"step"`
-	Playing bool           `json:"playing"`
-	Tracks  [8]*TrackState `json:"tracks"`
+	Tempo         int            `json:"tempo"`
+	Step          int            `json:"-"` // runtime only
+	Playing       bool           `json:"-"` // runtime only
+	Tracks        [8]*TrackState `json:"tracks"`
+	NoteInputPort string         `json:"noteInputPort,omitempty"` // MIDI keyboard input
+	ProjectName   string         `json:"-"`                       // runtime only - current project name
 }
 
 // TrackState holds all state for a single track
@@ -23,6 +25,7 @@ type TrackState struct {
 	Solo     bool       `json:"solo"`
 	PortName string     `json:"portName,omitempty"`
 	Type     DeviceType `json:"type"`
+	Kit      string     `json:"kit,omitempty"` // drum kit mapping ("gm", "rd8", etc.)
 
 	// Device-specific state (only one populated based on Type)
 	Drum  *DrumState  `json:"drum,omitempty"`
@@ -42,6 +45,10 @@ type DrumState struct {
 	Selected int `json:"selected"`
 	Editing  int `json:"editing"`
 	Cursor   int `json:"cursor"`
+
+	// Recording
+	Recording bool `json:"-"` // runtime only - record input to pattern
+	Preview   bool `json:"-"` // runtime only - MIDI thru
 }
 
 // DrumPatternState holds pattern data
@@ -53,7 +60,6 @@ type DrumPatternState struct {
 type DrumTrackState struct {
 	Steps  [32]DrumStepState `json:"steps"`
 	Length int               `json:"length"`
-	Note   uint8             `json:"note"`
 }
 
 // DrumStepState holds a single step
@@ -86,6 +92,10 @@ type PianoState struct {
 
 	// Selection
 	SelectedNote int `json:"selectedNote"`
+
+	// Recording
+	Recording bool `json:"-"` // runtime only - record input to pattern
+	Preview   bool `json:"-"` // runtime only - MIDI thru
 }
 
 // PianoPatternState holds pattern data
@@ -131,17 +141,10 @@ func NewDrumState() *DrumState {
 		Cursor:   0,
 	}
 
-	// GM drum notes
-	gmNotes := []uint8{
-		36, 38, 42, 46, 41, 43, 45, 49,
-		51, 39, 56, 75, 54, 69, 70, 37,
-	}
-
 	for i := range d.Patterns {
 		for t := 0; t < 16; t++ {
 			d.Patterns[i].Tracks[t] = DrumTrackState{
 				Length: 16,
-				Note:   gmNotes[t],
 			}
 			for s := 0; s < 32; s++ {
 				d.Patterns[i].Tracks[t].Steps[s] = DrumStepState{

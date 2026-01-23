@@ -33,6 +33,11 @@ func (e *EmptyDevice) ContentMask() []bool {
 
 func (e *EmptyDevice) HandleMIDI(event midi.Event) {}
 
+func (e *EmptyDevice) ToggleRecording() {}
+func (e *EmptyDevice) TogglePreview()   {}
+func (e *EmptyDevice) IsRecording() bool { return false }
+func (e *EmptyDevice) IsPreviewing() bool { return false }
+
 func (e *EmptyDevice) View() string {
 	out := fmt.Sprintf("TRACK %d  (empty)\n\n", e.trackNum)
 	out += "No device assigned to this track.\n\n"
@@ -50,11 +55,31 @@ func (e *EmptyDevice) View() string {
 
 	// Launchpad
 	out += "\n\n"
-	out += widgets.RenderLaunchpad(e.HelpLayout())
-	out += "\n"
-	out += widgets.RenderLegend([]widgets.Zone{
-		{Name: "Empty", Color: [3]uint8{40, 40, 40}, Desc: "no device assigned"},
-	})
+	out += e.renderLaunchpadHelp()
+
+	return out
+}
+
+func (e *EmptyDevice) renderLaunchpadHelp() string {
+	dimColor := [3]uint8{40, 40, 40}
+
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+	topRow := make([][3]uint8, 8)
+
+	for i := 0; i < 8; i++ {
+		topRow[i] = dimColor
+		rightCol[i] = dimColor
+	}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = dimColor
+		}
+	}
+
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+	out += widgets.RenderLegendItem(dimColor, "Empty", "no device assigned")
 
 	return out
 }
@@ -79,26 +104,4 @@ func (e *EmptyDevice) HandleKey(key string) {
 
 func (e *EmptyDevice) HandlePad(row, col int) {
 	// Nothing to do
-}
-
-func (e *EmptyDevice) HelpLayout() widgets.LaunchpadLayout {
-	dimColor := [3]uint8{40, 40, 40}
-
-	var layout widgets.LaunchpadLayout
-
-	for i := 0; i < 8; i++ {
-		layout.TopRow[i] = widgets.PadConfig{Color: dimColor, Tooltip: "Empty"}
-	}
-
-	for row := 0; row < 8; row++ {
-		for col := 0; col < 8; col++ {
-			layout.Grid[row][col] = widgets.PadConfig{Color: dimColor, Tooltip: "Empty"}
-		}
-	}
-
-	for i := 0; i < 8; i++ {
-		layout.RightCol[i] = widgets.PadConfig{Color: dimColor, Tooltip: "Empty"}
-	}
-
-	return layout
 }

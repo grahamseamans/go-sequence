@@ -31,12 +31,14 @@ Working: Drum sequencer (16 sounds, 32 steps, variable length), piano roll (note
 - [x] Toggle steps
 - [x] Basic playback
 - [x] 1-32 steps per track (variable length, `[`/`]` to adjust)
-- [x] 16 sounds/notes per pattern (GM drum kit defaults)
+- [x] 16 sounds/notes per pattern
+- [x] Drum kit mapping (GM, RD-8, TR-8S, ER-1) - patterns store slot indices, kit maps to MIDI notes
 - [x] Velocity per step (data exists, no per-step UI yet)
-- [x] Clear track (`c`)
+- [x] Clear track (`c`) / clear pattern (`C`)
 - [x] Launchpad layout (top: steps, bottom-left: track select, bottom-right: commands)
+- [x] Preview mode - audition sounds from track pads
+- [x] Record mode - record steps from MIDI input
 - [ ] Nudge notes forward/backward (data structure exists)
-- [ ] Record from MIDI input
 - [ ] Copy/paste pattern
 
 ### Piano Roll Device
@@ -73,16 +75,20 @@ The piano roll is for **editing notes you play in** via MIDI keyboard - not for 
 - [x] Channel mapping UI (Settings device)
 
 ### Save/Load
-- [ ] Save project to file
-- [ ] Load project
+- [x] Project folders with timestamped saves (`~/.config/go-sequence/projects/`)
+- [x] Quick save (Shift+S)
+- [x] Save device for browsing/loading (Shift+D)
+- [x] Create/rename/delete projects and saves
 
 
 ## Controls
 
 ### Global
-- `Q` - quit (shift+q)
-- `p` - play/stop
+- `Q` - quit (Shift+Q)
+- `P` - play/stop (Shift+P)
 - `+`/`-` - tempo ±5 BPM
+- `S` - quick save to current project (Shift+S)
+- `D` - focus save device (Shift+D)
 - `0` - focus session (clip launcher)
 - `1-8` - focus device by track number
 - `,` - focus settings
@@ -94,6 +100,11 @@ The piano roll is for **editing notes you play in** via MIDI keyboard - not for 
 - `[`/`]` - track length -/+
 - `c` - clear track
 - `<`/`>` - previous/next pattern (editing)
+
+**Launchpad commands** (bottom-right 4x4):
+- Preview toggle - audition sounds when tapping track pads
+- Record toggle - write steps when tapping track pads during playback
+- Clear track/pattern, length +/-
 
 ### Piano Roll
 **Select notes**

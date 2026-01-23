@@ -35,15 +35,17 @@ var EditVertSteps = []int{1, 12} // semitone, octave
 
 // PianoRollDevice reads/writes from central PianoState
 type PianoRollDevice struct {
-	state     *PianoState
-	heldNotes map[uint8]bool // runtime only - for note-off tracking
+	state        *PianoState
+	heldNotes    map[uint8]bool            // runtime only - for note-off tracking during playback
+	pendingNotes map[uint8]*NoteEventState // runtime only - for recording note-on/note-off pairs
 }
 
 // NewPianoRollDevice creates a device that operates on the given state
 func NewPianoRollDevice(state *PianoState) *PianoRollDevice {
 	return &PianoRollDevice{
-		state:     state,
-		heldNotes: make(map[uint8]bool),
+		state:        state,
+		heldNotes:    make(map[uint8]bool),
+		pendingNotes: make(map[uint8]*NoteEventState),
 	}
 }
 
@@ -111,7 +113,54 @@ func (p *PianoRollDevice) ContentMask() []bool {
 }
 
 func (p *PianoRollDevice) HandleMIDI(event midi.Event) {
-	// TODO: record from MIDI keyboard
+	// Only record while playing and recording is enabled
+	if !S.Playing || !p.state.Recording {
+		return
+	}
+
+	pattern := &p.state.Patterns[p.state.Editing]
+	// Convert step to beat (4 steps per beat)
+	currentBeat := float64(p.state.Step) / 4.0
+
+	// Quantize to nearest 1/16th note
+	quantized := float64(int(currentBeat*4+0.5)) / 4.0
+
+	if event.Type == midi.NoteOn && event.Velocity > 0 {
+		// Note on - start a pending note
+		p.pendingNotes[event.Note] = &NoteEventState{
+			Start:    quantized,
+			Pitch:    event.Note,
+			Velocity: event.Velocity,
+		}
+	} else if event.Type == midi.NoteOff || (event.Type == midi.NoteOn && event.Velocity == 0) {
+		// Note off - complete the pending note
+		if pending, ok := p.pendingNotes[event.Note]; ok {
+			endBeat := float64(int(currentBeat*4+0.5)) / 4.0
+			duration := endBeat - pending.Start
+			if duration < 0.25 {
+				duration = 0.25 // minimum 1/16th note
+			}
+			pending.Duration = duration
+			pattern.Notes = append(pattern.Notes, *pending)
+			delete(p.pendingNotes, event.Note)
+		}
+	}
+}
+
+func (p *PianoRollDevice) ToggleRecording() {
+	p.state.Recording = !p.state.Recording
+}
+
+func (p *PianoRollDevice) TogglePreview() {
+	p.state.Preview = !p.state.Preview
+}
+
+func (p *PianoRollDevice) IsRecording() bool {
+	return p.state.Recording
+}
+
+func (p *PianoRollDevice) IsPreviewing() bool {
+	return p.state.Preview
 }
 
 // formatStep formats a beat step value as a fraction
@@ -278,12 +327,7 @@ func (p *PianoRollDevice) View() string {
 	})
 
 	out += "\n\n"
-	out += widgets.RenderLaunchpad(p.HelpLayout())
-	out += "\n"
-	out += widgets.RenderLegend([]widgets.Zone{
-		{Name: "Notes", Color: [3]uint8{80, 200, 255}, Desc: "tap to add/select notes"},
-		{Name: "Scene", Color: [3]uint8{148, 18, 126}, Desc: "launch scenes"},
-	})
+	out += p.renderLaunchpadHelp()
 
 	return out
 }
@@ -632,26 +676,29 @@ func (p *PianoRollDevice) HandlePad(row, col int) {
 	p.centerOnSelection()
 }
 
-func (p *PianoRollDevice) HelpLayout() widgets.LaunchpadLayout {
+func (p *PianoRollDevice) renderLaunchpadHelp() string {
 	topRowColor := [3]uint8{111, 10, 126}
 	gridColor := [3]uint8{80, 200, 255}
 	sceneColor := [3]uint8{148, 18, 126}
 
-	var layout widgets.LaunchpadLayout
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+	topRow := make([][3]uint8, 8)
 
-	for i := range 8 {
-		layout.TopRow[i] = widgets.PadConfig{Color: topRowColor, Tooltip: "Mode"}
+	for i := 0; i < 8; i++ {
+		topRow[i] = topRowColor
+		rightCol[i] = sceneColor
 	}
-
-	for row := range 8 {
-		for col := range 8 {
-			layout.Grid[row][col] = widgets.PadConfig{Color: gridColor, Tooltip: "Note"}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = gridColor
 		}
 	}
 
-	for i := range 8 {
-		layout.RightCol[i] = widgets.PadConfig{Color: sceneColor, Tooltip: "Scene"}
-	}
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+	out += widgets.RenderLegendItem(gridColor, "Notes", "tap to add/select notes") + "\n"
+	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch scenes")
 
-	return layout
+	return out
 }

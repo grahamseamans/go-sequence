@@ -9,12 +9,26 @@ import (
 
 // DrumDevice reads/writes from central DrumState
 type DrumDevice struct {
-	state *DrumState
+	state       *DrumState
+	previewChan chan int // sends slot index when preview sound should play
+
+	// Confirmation dialog
+	confirmMode   bool
+	confirmMsg    string
+	confirmAction func()
 }
 
 // NewDrumDevice creates a device that operates on the given state
 func NewDrumDevice(state *DrumState) *DrumDevice {
-	return &DrumDevice{state: state}
+	return &DrumDevice{
+		state:       state,
+		previewChan: make(chan int, 16),
+	}
+}
+
+// PreviewChan returns the channel for preview events (slot indices)
+func (d *DrumDevice) PreviewChan() <-chan int {
+	return d.previewChan
 }
 
 // Device interface implementation
@@ -39,7 +53,7 @@ func (d *DrumDevice) Tick(step int) []midi.Event {
 		if step.Active {
 			events = append(events, midi.Event{
 				Type:     midi.NoteOn,
-				Note:     track.Note,
+				Note:     uint8(i), // Output slot index, Manager translates via kit
 				Velocity: step.Velocity,
 			})
 		}
@@ -80,6 +94,22 @@ func (d *DrumDevice) HandleMIDI(event midi.Event) {
 	// TODO: record mode - quantize incoming hits to steps
 }
 
+func (d *DrumDevice) ToggleRecording() {
+	d.state.Recording = !d.state.Recording
+}
+
+func (d *DrumDevice) TogglePreview() {
+	d.state.Preview = !d.state.Preview
+}
+
+func (d *DrumDevice) IsRecording() bool {
+	return d.state.Recording
+}
+
+func (d *DrumDevice) IsPreviewing() bool {
+	return d.state.Preview
+}
+
 func (d *DrumDevice) View() string {
 	s := d.state
 	pat := &s.Patterns[s.Editing]
@@ -92,6 +122,15 @@ func (d *DrumDevice) View() string {
 	selectedTrack := &pat.Tracks[s.Selected]
 	selectedStep := s.Step % selectedTrack.Length
 	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Track %d\n\n", s.Editing+1, playInfo, selectedStep+1, selectedTrack.Length, s.Selected+1)
+
+	// Confirmation dialog takes over
+	if d.confirmMode {
+		out += "─────────────────────────────────────────────────\n"
+		out += fmt.Sprintf("\n%s\n\n", d.confirmMsg)
+		out += "  [y] Yes    [n] No\n"
+		out += "\n─────────────────────────────────────────────────\n"
+		return out
+	}
 
 	// 16x32 grid - single char per cell
 	for t := 0; t < 16; t++ {
@@ -149,14 +188,7 @@ func (d *DrumDevice) View() string {
 
 	// Launchpad
 	out += "\n\n"
-	out += widgets.RenderLaunchpad(d.HelpLayout())
-	out += "\n"
-	out += widgets.RenderLegend([]widgets.Zone{
-		{Name: "Steps", Color: [3]uint8{234, 73, 116}, Desc: "tap to toggle steps 1-32"},
-		{Name: "Track", Color: [3]uint8{148, 18, 126}, Desc: "tap to select track 1-16"},
-		{Name: "Commands", Color: [3]uint8{253, 157, 110}, Desc: "clear, nudge, length, velocity"},
-		{Name: "Scene", Color: [3]uint8{71, 13, 121}, Desc: "launch scenes"},
-	})
+	out += d.renderLaunchpadHelp()
 
 	return out
 }
@@ -226,16 +258,48 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 	}
 
 	// Bottom-right 4x4: commands
+	previewActive := [3]uint8{0, 255, 0}   // green when on
+	recordActive := [3]uint8{255, 0, 0}    // red when on
 	for row := 0; row < 4; row++ {
 		for col := 4; col < 8; col++ {
-			leds = append(leds, LEDState{Row: row, Col: col, Color: commandsColor, Channel: midi.ChannelStatic})
+			color := commandsColor
+			// Preview button (row 3, col 4)
+			if row == 3 && col == 4 && s.Preview {
+				color = previewActive
+			}
+			// Record button (row 3, col 5)
+			if row == 3 && col == 5 && s.Recording {
+				color = recordActive
+			}
+			leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: midi.ChannelStatic})
 		}
 	}
 
 	return leds
 }
 
+// IsInputMode returns true if in confirm mode
+func (d *DrumDevice) IsInputMode() bool {
+	return d.confirmMode
+}
+
 func (d *DrumDevice) HandleKey(key string) {
+	// Confirmation mode
+	if d.confirmMode {
+		switch key {
+		case "y", "Y":
+			if d.confirmAction != nil {
+				d.confirmAction()
+			}
+			d.confirmMode = false
+			d.confirmAction = nil
+		case "n", "N", "esc", "q":
+			d.confirmMode = false
+			d.confirmAction = nil
+		}
+		return
+	}
+
 	s := d.state
 	pat := &s.Patterns[s.Editing]
 	track := &pat.Tracks[s.Selected]
@@ -279,9 +343,9 @@ func (d *DrumDevice) HandleKey(key string) {
 			track.Length++
 		}
 	case "c":
-		for step := 0; step < 32; step++ {
-			track.Steps[step].Active = false
-		}
+		d.confirmClearTrack()
+	case "C":
+		d.confirmClearPattern()
 	case "<", ",":
 		if s.Editing > 0 {
 			s.Editing--
@@ -291,6 +355,61 @@ func (d *DrumDevice) HandleKey(key string) {
 			s.Editing++
 		}
 	}
+}
+
+func (d *DrumDevice) confirmClearTrack() {
+	s := d.state
+	pat := &s.Patterns[s.Editing]
+	track := &pat.Tracks[s.Selected]
+
+	// Check if track has any content
+	hasContent := false
+	for i := 0; i < track.Length; i++ {
+		if track.Steps[i].Active {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return // nothing to clear
+	}
+
+	d.confirmMsg = fmt.Sprintf("Clear track %d?", s.Selected+1)
+	d.confirmAction = func() {
+		for step := 0; step < 32; step++ {
+			track.Steps[step].Active = false
+		}
+	}
+	d.confirmMode = true
+}
+
+func (d *DrumDevice) confirmClearPattern() {
+	s := d.state
+	pat := &s.Patterns[s.Editing]
+
+	// Check if pattern has any content
+	hasContent := false
+	for t := 0; t < 16 && !hasContent; t++ {
+		for step := 0; step < pat.Tracks[t].Length; step++ {
+			if pat.Tracks[t].Steps[step].Active {
+				hasContent = true
+				break
+			}
+		}
+	}
+	if !hasContent {
+		return // nothing to clear
+	}
+
+	d.confirmMsg = fmt.Sprintf("Clear pattern %d?", s.Editing+1)
+	d.confirmAction = func() {
+		for t := 0; t < 16; t++ {
+			for step := 0; step < 32; step++ {
+				pat.Tracks[t].Steps[step].Active = false
+			}
+		}
+	}
+	d.confirmMode = true
 }
 
 func (d *DrumDevice) HandlePad(row, col int) {
@@ -308,64 +427,123 @@ func (d *DrumDevice) HandlePad(row, col int) {
 		return
 	}
 
-	// Bottom-left 4x4: track select
+	// Bottom-left 4x4: track select (and record/preview)
 	if row < 4 && col < 4 {
 		trackIdx := row*4 + col
 		if trackIdx < 16 {
+			// Always select the track
 			s.Selected = trackIdx
 			if s.Cursor >= pat.Tracks[s.Selected].Length {
 				s.Cursor = pat.Tracks[s.Selected].Length - 1
 			}
+
+			// If preview mode, play the sound
+			if s.Preview {
+				select {
+				case d.previewChan <- trackIdx:
+				default:
+				}
+			}
+
+			// If recording while playing, write a step at current position
+			if s.Recording && S.Playing {
+				track := &pat.Tracks[trackIdx]
+				stepIdx := s.Step % track.Length
+				track.Steps[stepIdx].Active = true
+				track.Steps[stepIdx].Velocity = 100 // default velocity
+			}
+		}
+		return
+	}
+
+	// Bottom-right 4x4: command pads
+	if row < 4 && col >= 4 {
+		track := &pat.Tracks[s.Selected]
+		switch {
+		// Row 0: Clear Track, Clear Pattern, Copy, Paste
+		case row == 0 && col == 4: // Clear Track
+			d.confirmClearTrack()
+		case row == 0 && col == 5: // Clear Pattern
+			d.confirmClearPattern()
+		// Row 1: Nudge Left, Nudge Right, Length -, Length +
+		case row == 1 && col == 6: // Length -
+			if track.Length > 1 {
+				track.Length--
+				if s.Cursor >= track.Length {
+					s.Cursor = track.Length - 1
+				}
+			}
+		case row == 1 && col == 7: // Length +
+			if track.Length < 32 {
+				track.Length++
+			}
+		// Row 3: Preview, Record, Mute, Solo
+		case row == 3 && col == 4: // Preview toggle
+			s.Preview = !s.Preview
+		case row == 3 && col == 5: // Record toggle
+			s.Recording = !s.Recording
 		}
 		return
 	}
 }
 
-func (d *DrumDevice) HelpLayout() widgets.LaunchpadLayout {
+func (d *DrumDevice) renderLaunchpadHelp() string {
+	// Colors
 	topRowColor := [3]uint8{111, 10, 126}
 	stepsColor := [3]uint8{234, 73, 116}
-	trackSelectColor := [3]uint8{148, 18, 126}
+	trackColor := [3]uint8{148, 18, 126}
 	commandsColor := [3]uint8{253, 157, 110}
 	sceneColor := [3]uint8{71, 13, 121}
 
-	var layout widgets.LaunchpadLayout
+	// Build the grid
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
 
-	for i := 0; i < 8; i++ {
-		layout.TopRow[i] = widgets.PadConfig{Color: topRowColor, Tooltip: "Mode"}
-	}
-
+	// Top 4 rows: steps
 	for row := 4; row < 8; row++ {
 		for col := 0; col < 8; col++ {
-			layout.Grid[row][col] = widgets.PadConfig{Color: stepsColor, Tooltip: "Steps"}
+			grid[row][col] = stepsColor
 		}
 	}
 
+	// Bottom-left 4x4: track select
 	for row := 0; row < 4; row++ {
 		for col := 0; col < 4; col++ {
-			layout.Grid[row][col] = widgets.PadConfig{Color: trackSelectColor, Tooltip: "Track Select"}
+			grid[row][col] = trackColor
 		}
 	}
 
-	layout.Grid[0][4] = widgets.PadConfig{Color: commandsColor, Tooltip: "Clear Track"}
-	layout.Grid[0][5] = widgets.PadConfig{Color: commandsColor, Tooltip: "Clear Pattern"}
-	layout.Grid[0][6] = widgets.PadConfig{Color: commandsColor, Tooltip: "Copy"}
-	layout.Grid[0][7] = widgets.PadConfig{Color: commandsColor, Tooltip: "Paste"}
-	layout.Grid[1][4] = widgets.PadConfig{Color: commandsColor, Tooltip: "Nudge Left"}
-	layout.Grid[1][5] = widgets.PadConfig{Color: commandsColor, Tooltip: "Nudge Right"}
-	layout.Grid[1][6] = widgets.PadConfig{Color: commandsColor, Tooltip: "Length -"}
-	layout.Grid[1][7] = widgets.PadConfig{Color: commandsColor, Tooltip: "Length +"}
-	layout.Grid[2][4] = widgets.PadConfig{Color: commandsColor, Tooltip: "Velocity -"}
-	layout.Grid[2][5] = widgets.PadConfig{Color: commandsColor, Tooltip: "Velocity +"}
-	layout.Grid[2][6] = widgets.PadConfig{Color: commandsColor, Tooltip: "Swing -"}
-	layout.Grid[2][7] = widgets.PadConfig{Color: commandsColor, Tooltip: "Swing +"}
-	layout.Grid[3][4] = widgets.PadConfig{Color: commandsColor, Tooltip: "Undo"}
-	layout.Grid[3][5] = widgets.PadConfig{Color: commandsColor, Tooltip: "Redo"}
-	layout.Grid[3][6] = widgets.PadConfig{Color: commandsColor, Tooltip: "Mute"}
-	layout.Grid[3][7] = widgets.PadConfig{Color: commandsColor, Tooltip: "Solo"}
-
-	for i := 0; i < 8; i++ {
-		layout.RightCol[i] = widgets.PadConfig{Color: sceneColor, Tooltip: "Scene"}
+	// Bottom-right 4x4: commands
+	for row := 0; row < 4; row++ {
+		for col := 4; col < 8; col++ {
+			grid[row][col] = commandsColor
+		}
 	}
 
-	return layout
+	// Right column: scenes
+	for i := 0; i < 8; i++ {
+		rightCol[i] = sceneColor
+	}
+
+	// Top row
+	topRow := make([][3]uint8, 8)
+	for i := range topRow {
+		topRow[i] = topRowColor
+	}
+
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+
+	// Legend
+	out += widgets.RenderLegendItem(stepsColor, "Steps", "tap to toggle steps 1-32") + "\n"
+	out += widgets.RenderLegendItem(trackColor, "Track", "select track 1-16 (plays sound in preview mode)") + "\n"
+	out += widgets.RenderLegendItem(commandsColor, "Commands", "") + "\n"
+	out += `    Row 3: [Preview] [Record]  (Mute)   (Solo)
+    Row 2: (Vel -)   (Vel +)   (-)      (-)
+    Row 1: (Nudge<)  (Nudge>)  [Len -]  [Len +]
+    Row 0: [ClrTrk]  [ClrPat]  (Copy)   (Paste)
+    [ ] = implemented, ( ) = not yet` + "\n"
+	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch scenes")
+
+	return out
 }

@@ -75,6 +75,11 @@ func (s *SessionDevice) HandleMIDI(event midi.Event) {
 	}
 }
 
+func (s *SessionDevice) ToggleRecording() {}
+func (s *SessionDevice) TogglePreview()   {}
+func (s *SessionDevice) IsRecording() bool { return false }
+func (s *SessionDevice) IsPreviewing() bool { return false }
+
 func (s *SessionDevice) View() string {
 	var out string
 	out += "SESSION  Clip Launcher\n\n"
@@ -140,12 +145,7 @@ func (s *SessionDevice) View() string {
 
 	// Launchpad
 	out += "\n\n"
-	out += widgets.RenderLaunchpad(s.HelpLayout())
-	out += "\n"
-	out += widgets.RenderLegend([]widgets.Zone{
-		{Name: "Clips", Color: [3]uint8{71, 13, 121}, Desc: "tap to launch clip"},
-		{Name: "Scene", Color: [3]uint8{148, 18, 126}, Desc: "launch entire row"},
-	})
+	out += s.renderLaunchpadHelp()
 
 	return out
 }
@@ -257,26 +257,79 @@ func (s *SessionDevice) HandlePad(row, col int) {
 	}
 }
 
-func (s *SessionDevice) HelpLayout() widgets.LaunchpadLayout {
-	topRowColor := [3]uint8{111, 10, 126}
-	clipsColor := [3]uint8{71, 13, 121}
-	sceneColor := [3]uint8{148, 18, 126}
+func (s *SessionDevice) renderLaunchpadHelp() string {
+	// Define colors
+	clipColor := [3]uint8{71, 13, 121}     // clips with content
+	playingColor := [3]uint8{71, 13, 121}  // currently playing
+	queuedColor := [3]uint8{255, 200, 0}   // queued for playback
+	emptyColor := [3]uint8{20, 4, 30}      // empty slot
+	topRowColor := [3]uint8{111, 10, 126}  // top row mode buttons
+	sceneColor := [3]uint8{148, 18, 126}   // scene launch buttons
 
-	var layout widgets.LaunchpadLayout
+	var out string
 
+	// Top row
+	topColors := make([][3]uint8, 8)
 	for i := 0; i < 8; i++ {
-		layout.TopRow[i] = widgets.PadConfig{Color: topRowColor, Tooltip: "Mode"}
+		topColors[i] = topRowColor
 	}
+	out += widgets.RenderPadRow(topColors) + "\n"
 
-	for row := 0; row < 8; row++ {
-		for col := 0; col < 8; col++ {
-			layout.Grid[row][col] = widgets.PadConfig{Color: clipsColor, Tooltip: "Launch Clip"}
+	// Main grid with right column
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+
+	// Get content masks for all tracks
+	masks := make([][]bool, 8)
+	for i := 0; i < 8; i++ {
+		dev := s.manager.GetDevice(i)
+		if dev != nil {
+			masks[i] = dev.ContentMask()
+		} else {
+			masks[i] = make([]bool, NumPatterns)
 		}
 	}
 
-	for i := 0; i < 8; i++ {
-		layout.RightCol[i] = widgets.PadConfig{Color: sceneColor, Tooltip: "Launch Scene"}
+	// Build the grid with actual clip state
+	for lpRow := 0; lpRow < 8; lpRow++ {
+		patternRow := s.viewOffset + (7 - lpRow)
+
+		for col := 0; col < 8; col++ {
+			pattern, next := s.getTrackPatternState(col)
+
+			// Default to empty
+			color := emptyColor
+
+			if patternRow < NumPatterns {
+				hasContent := masks[col][patternRow]
+
+				if pattern == patternRow {
+					// Currently playing
+					color = playingColor
+				} else if next == patternRow && next != pattern {
+					// Queued
+					color = queuedColor
+				} else if hasContent {
+					// Has content
+					color = clipColor
+				}
+			}
+
+			grid[lpRow][col] = color
+		}
+
+		// Right column - scene buttons
+		rightCol[lpRow] = sceneColor
 	}
 
-	return layout
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n"
+
+	// Legend
+	out += widgets.RenderLegendItem(clipColor, "Clips", "tap to launch clip") + "\n"
+	out += widgets.RenderLegendItem(playingColor, "Playing", "currently playing clip") + "\n"
+	out += widgets.RenderLegendItem(queuedColor, "Queued", "queued for next bar") + "\n"
+	out += widgets.RenderLegendItem(emptyColor, "Empty", "no content") + "\n"
+	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch entire row")
+
+	return out
 }

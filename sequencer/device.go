@@ -2,7 +2,6 @@ package sequencer
 
 import (
 	"go-sequence/midi"
-	"go-sequence/widgets"
 )
 
 const NumPatterns = 128
@@ -35,14 +34,17 @@ type Device interface {
 	// External MIDI input (keyboard for recording, etc.)
 	HandleMIDI(event midi.Event)
 
+	// Recording control
+	ToggleRecording() // toggle record arm for this device
+	TogglePreview()   // toggle MIDI thru for this device
+	IsRecording() bool
+	IsPreviewing() bool
+
 	// UI - device returns render data, Manager handles output
 	View() string
 	RenderLEDs() []LEDState
 	HandleKey(key string)
 	HandlePad(row, col int)
-
-	// Help widget layout (device-specific)
-	HelpLayout() widgets.LaunchpadLayout
 }
 
 // LEDState describes the state of a single LED
