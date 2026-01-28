@@ -17,19 +17,16 @@ func NewEmptyDevice(trackNum int) *EmptyDevice {
 	return &EmptyDevice{trackNum: trackNum}
 }
 
-// Device interface implementation
+// Device interface implementation - queue-based (stubs for non-music device)
 
-func (e *EmptyDevice) Tick(step int) []midi.Event {
-	return nil
-}
-
-func (e *EmptyDevice) QueuePattern(p int) (pattern, next int) {
-	return 0, 0
-}
-
-func (e *EmptyDevice) ContentMask() []bool {
-	return make([]bool, NumPatterns)
-}
+func (e *EmptyDevice) FillUntil(tick int64)           {}
+func (e *EmptyDevice) PeekNextEvent() *midi.Event     { return nil }
+func (e *EmptyDevice) PopNextEvent() *midi.Event      { return nil }
+func (e *EmptyDevice) ClearQueue()                    {}
+func (e *EmptyDevice) QueuePattern(p int, atTick int64) {}
+func (e *EmptyDevice) CurrentPattern() int            { return 0 }
+func (e *EmptyDevice) NextPattern() int               { return -1 }
+func (e *EmptyDevice) ContentMask() []bool            { return make([]bool, NumPatterns) }
 
 func (e *EmptyDevice) HandleMIDI(event midi.Event) {}
 

@@ -59,6 +59,9 @@ func main() {
 	saveDevice := sequencer.NewSaveDevice(manager)
 	manager.SetSave(saveDevice)
 
+	// Start all runtime goroutines
+	manager.StartRuntime()
+
 	// Create MIDI device manager
 	fmt.Println("initializing MIDI...")
 	deviceMgr := midi.NewDeviceManager()
@@ -76,6 +79,11 @@ func main() {
 			fmt.Printf("Connected: %s\n", ctrl.ID())
 			manager.SetController(ctrl)
 		}
+	}
+
+	// Wire MIDI input if available
+	if noteInput := deviceMgr.GetNoteInput(); noteInput != nil {
+		manager.SetMIDIInput(noteInput)
 	}
 	fmt.Println("")
 

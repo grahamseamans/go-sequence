@@ -64,19 +64,16 @@ func (s *SettingsDevice) SetMIDIPorts(inputs, outputs []string) {
 	s.midiOutputs = outputs
 }
 
-// Device interface implementation
+// Device interface implementation - queue-based (stubs for non-music device)
 
-func (s *SettingsDevice) Tick(step int) []midi.Event {
-	return nil // Settings doesn't produce MIDI
-}
-
-func (s *SettingsDevice) QueuePattern(p int) (pattern, next int) {
-	return 0, 0
-}
-
-func (s *SettingsDevice) ContentMask() []bool {
-	return make([]bool, NumPatterns)
-}
+func (s *SettingsDevice) FillUntil(tick int64)           {}
+func (s *SettingsDevice) PeekNextEvent() *midi.Event     { return nil }
+func (s *SettingsDevice) PopNextEvent() *midi.Event      { return nil }
+func (s *SettingsDevice) ClearQueue()                    {}
+func (s *SettingsDevice) QueuePattern(p int, atTick int64) {}
+func (s *SettingsDevice) CurrentPattern() int            { return 0 }
+func (s *SettingsDevice) NextPattern() int               { return -1 }
+func (s *SettingsDevice) ContentMask() []bool            { return make([]bool, NumPatterns) }
 
 func (s *SettingsDevice) HandleMIDI(event midi.Event) {
 	// Could use this for "learn" functionality later
@@ -292,6 +289,8 @@ func (s *SettingsDevice) getDeviceTypeName(trackIdx int) string {
 		return "Drum"
 	case DeviceTypePiano:
 		return "Piano"
+	case DeviceTypeMetropolix:
+		return "Metropolix"
 	default:
 		return "(empty)"
 	}
@@ -389,7 +388,7 @@ func (s *SettingsDevice) openPopupForCurrentCell() {
 	case 0: // Device type
 		s.popup = &PopupState{
 			Type:       PopupDeviceType,
-			Options:    []string{"Drum", "Piano", "(empty)"},
+			Options:    []string{"Drum", "Piano", "Metropolix", "(empty)"},
 			Selected:   0,
 			TrackIndex: s.cursorRow,
 		}
@@ -536,6 +535,8 @@ func (s *SettingsDevice) optionToDeviceType(opt string) DeviceType {
 		return DeviceTypeDrum
 	case "Piano":
 		return DeviceTypePiano
+	case "Metropolix":
+		return DeviceTypeMetropolix
 	default:
 		return DeviceTypeNone
 	}
@@ -548,6 +549,8 @@ func (s *SettingsDevice) changeDeviceType(trackIdx int, deviceType DeviceType) {
 		dev = s.manager.CreateDrumDevice(trackIdx)
 	case DeviceTypePiano:
 		dev = s.manager.CreatePianoDevice(trackIdx)
+	case DeviceTypeMetropolix:
+		dev = s.manager.CreateMetropolixDevice(trackIdx)
 	case DeviceTypeNone:
 		dev = s.manager.CreateEmptyDevice(trackIdx)
 	}

@@ -82,19 +82,16 @@ func (s *SaveDevice) Refresh() {
 	}
 }
 
-// Device interface implementation
+// Device interface implementation - queue-based (stubs for non-music device)
 
-func (s *SaveDevice) Tick(step int) []midi.Event {
-	return nil // Save device doesn't produce MIDI
-}
-
-func (s *SaveDevice) QueuePattern(p int) (pattern, next int) {
-	return 0, 0
-}
-
-func (s *SaveDevice) ContentMask() []bool {
-	return make([]bool, NumPatterns)
-}
+func (s *SaveDevice) FillUntil(tick int64)           {}
+func (s *SaveDevice) PeekNextEvent() *midi.Event     { return nil }
+func (s *SaveDevice) PopNextEvent() *midi.Event      { return nil }
+func (s *SaveDevice) ClearQueue()                    {}
+func (s *SaveDevice) QueuePattern(p int, atTick int64) {}
+func (s *SaveDevice) CurrentPattern() int            { return 0 }
+func (s *SaveDevice) NextPattern() int               { return -1 }
+func (s *SaveDevice) ContentMask() []bool            { return make([]bool, NumPatterns) }
 
 func (s *SaveDevice) HandleMIDI(event midi.Event) {}
 

@@ -3,6 +3,7 @@ package sequencer
 import (
 	"fmt"
 	"sort"
+	"sync"
 
 	"go-sequence/midi"
 	"go-sequence/widgets"
@@ -38,68 +39,272 @@ type PianoRollDevice struct {
 	state        *PianoState
 	heldNotes    map[uint8]bool            // runtime only - for note-off tracking during playback
 	pendingNotes map[uint8]*NoteEventState // runtime only - for recording note-on/note-off pairs
+
+	// Queue-based playback - protected by queueMu (held ONLY during swap, not generation)
+	queueMu          sync.RWMutex
+	queue            []midi.Event // events sorted by tick
+	queuedUntilTick  int64        // how far we've filled the queue
+	patternStartTick int64        // tick when current pattern started
+	onQueueChange    func()       // callback to wake manager when queue needs recalc
+
+	// Pattern switching
+	nextPatternTick int64 // tick when next pattern should start (-1 if none)
 }
 
 // NewPianoRollDevice creates a device that operates on the given state
 func NewPianoRollDevice(state *PianoState) *PianoRollDevice {
 	return &PianoRollDevice{
-		state:        state,
-		heldNotes:    make(map[uint8]bool),
-		pendingNotes: make(map[uint8]*NoteEventState),
+		state:           state,
+		heldNotes:       make(map[uint8]bool),
+		pendingNotes:    make(map[uint8]*NoteEventState),
+		nextPatternTick: -1,
 	}
 }
 
-func (p *PianoRollDevice) Tick(step int) []midi.Event {
-	s := p.state
-	if s.Step == 0 {
-		s.Pattern = s.Next
-	}
+// SetOnQueueChange sets the callback for when the queue needs recalculation
+func (p *PianoRollDevice) SetOnQueueChange(fn func()) {
+	p.onQueueChange = fn
+}
 
-	pat := &s.Patterns[s.Pattern]
-	beat := float64(s.Step) / 4.0
-	nextBeat := float64(s.Step+1) / 4.0
+// currentBeat returns the current playback beat derived from global tick
+func (p *PianoRollDevice) currentBeat() float64 {
+	ticksSinceStart := S.Tick - p.patternStartTick
+	if ticksSinceStart < 0 {
+		ticksSinceStart = 0
+	}
+	pat := &p.state.Patterns[p.state.Pattern]
+	patternTicks := int64(pat.Length * float64(PPQ))
+	tickInPattern := ticksSinceStart % patternTicks
+	return float64(tickInPattern) / float64(PPQ)
+}
+
+// GeneratePattern generates all MIDI events for a pattern starting at startTick.
+// This is the ONLY place pattern data → events conversion happens.
+func (p *PianoRollDevice) GeneratePattern(patternNum int, startTick int64) []midi.Event {
+	pat := &p.state.Patterns[patternNum]
+	ticksPerBeat := int64(PPQ)
 
 	var events []midi.Event
 
-	// Note-offs for notes that should end
-	for pitch := range p.heldNotes {
-		for _, note := range pat.Notes {
-			if note.Pitch == pitch {
-				endBeat := note.Start + note.Duration
-				if endBeat > s.LastBeat && endBeat <= beat {
-					events = append(events, midi.Event{
-						Type: midi.NoteOff,
-						Note: pitch,
-					})
-					delete(p.heldNotes, pitch)
-				}
-			}
-		}
-	}
-
-	// Note-ons for notes that start this tick
 	for _, note := range pat.Notes {
-		if note.Start >= beat && note.Start < nextBeat {
-			events = append(events, midi.Event{
-				Type:     midi.NoteOn,
-				Note:     note.Pitch,
-				Velocity: note.Velocity,
-			})
-			p.heldNotes[note.Pitch] = true
-		}
+		// Note on
+		noteTick := startTick + int64(note.Start*float64(ticksPerBeat))
+		events = append(events, midi.Event{
+			Tick:     noteTick,
+			Type:     midi.NoteOn,
+			Note:     note.Pitch,
+			Velocity: note.Velocity,
+		})
+
+		// Note off
+		noteEndTick := startTick + int64((note.Start+note.Duration)*float64(ticksPerBeat))
+		events = append(events, midi.Event{
+			Tick: noteEndTick,
+			Type: midi.NoteOff,
+			Note: note.Pitch,
+		})
 	}
 
-	s.LastBeat = beat
-	s.Step = (s.Step + 1) % int(pat.Length*4)
+	// Sort by tick (notes may not be in time order)
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].Tick < events[j].Tick
+	})
 
 	return events
 }
 
-func (p *PianoRollDevice) QueuePattern(pat int) (pattern, next int) {
-	if pat >= 0 && pat < NumPatterns {
-		p.state.Next = pat
+// patternLengthTicks returns the length of a pattern in ticks
+func (p *PianoRollDevice) patternLengthTicks(patternNum int) int64 {
+	pat := &p.state.Patterns[patternNum]
+	return int64(pat.Length * float64(PPQ))
+}
+
+// Device interface implementation - queue-based
+
+// FillUntil fills the event queue with events up to the given tick
+func (p *PianoRollDevice) FillUntil(tick int64) {
+	// Read current state
+	p.queueMu.RLock()
+	queuedUntil := p.queuedUntilTick
+	patternStart := p.patternStartTick
+	nextPatTick := p.nextPatternTick
+	p.queueMu.RUnlock()
+
+	if queuedUntil >= tick {
+		return // already filled
 	}
-	return p.state.Pattern, p.state.Next
+
+	// Generate events OUTSIDE the lock
+	var newEvents []midi.Event
+	currentPattern := p.state.Pattern
+	for queuedUntil < tick {
+		// Check for pattern switch at boundary
+		if nextPatTick >= 0 && queuedUntil >= nextPatTick {
+			p.state.Pattern = p.state.Next
+			currentPattern = p.state.Pattern
+			patternStart = nextPatTick
+			nextPatTick = -1
+		}
+
+		events := p.GeneratePattern(currentPattern, queuedUntil)
+		newEvents = append(newEvents, events...)
+		queuedUntil += p.patternLengthTicks(currentPattern)
+	}
+
+	// Swap in new events (brief lock)
+	p.queueMu.Lock()
+	p.queue = append(p.queue, newEvents...)
+	p.queuedUntilTick = queuedUntil
+	p.patternStartTick = patternStart
+	p.nextPatternTick = nextPatTick
+	p.queueMu.Unlock()
+}
+
+// regeneratePatternInQueue replaces events for a pattern if it's currently in the queue.
+// Called from UI thread - generates events WITHOUT holding lock, then swaps.
+func (p *PianoRollDevice) regeneratePatternInQueue(patternNum int) {
+	if patternNum != p.state.Pattern {
+		return // only regenerate if it's the playing pattern
+	}
+
+	patternTicks := p.patternLengthTicks(patternNum)
+
+	// --- Read current state (brief lock) ---
+	p.queueMu.RLock()
+	oldQueue := p.queue
+	oldQueuedUntil := p.queuedUntilTick
+	patternStart := p.patternStartTick
+	p.queueMu.RUnlock()
+
+	// --- Generate new queue OUTSIDE the lock (this is the slow part) ---
+	var newQueue []midi.Event
+
+	// Keep events before current pattern start
+	for _, e := range oldQueue {
+		if e.Tick < patternStart {
+			newQueue = append(newQueue, e)
+		}
+	}
+
+	// Regenerate from pattern start to where we had queued
+	newQueuedUntil := patternStart
+	for newQueuedUntil < oldQueuedUntil {
+		events := p.GeneratePattern(p.state.Pattern, newQueuedUntil)
+		newQueue = append(newQueue, events...)
+		newQueuedUntil += patternTicks
+	}
+
+	// --- Swap in new queue (brief lock) ---
+	p.queueMu.Lock()
+	p.queue = newQueue
+	p.queuedUntilTick = newQueuedUntil
+	p.queueMu.Unlock()
+
+	// --- Wake dispatch loop to recalculate next event ---
+	if p.onQueueChange != nil {
+		p.onQueueChange()
+	}
+}
+
+// PeekNextEvent returns the next event without removing it
+func (p *PianoRollDevice) PeekNextEvent() *midi.Event {
+	p.queueMu.RLock()
+	defer p.queueMu.RUnlock()
+
+	if len(p.queue) == 0 {
+		return nil
+	}
+	return &p.queue[0]
+}
+
+// PopNextEvent removes and returns the next event
+func (p *PianoRollDevice) PopNextEvent() *midi.Event {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	if len(p.queue) == 0 {
+		return nil
+	}
+	event := p.queue[0]
+	p.queue = p.queue[1:]
+	return &event
+}
+
+// ClearQueue clears all queued events (for stop/restart)
+func (p *PianoRollDevice) ClearQueue() {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	p.queue = nil
+	p.queuedUntilTick = 0
+	p.patternStartTick = 0
+	p.nextPatternTick = -1
+	p.heldNotes = make(map[uint8]bool)
+}
+
+// QueuePattern queues a pattern change at the next boundary after atTick
+func (p *PianoRollDevice) QueuePattern(patIdx int, atTick int64) {
+	if patIdx < 0 || patIdx >= NumPatterns {
+		return
+	}
+	p.state.Next = patIdx
+
+	// Find next pattern boundary
+	pat := &p.state.Patterns[p.state.Pattern]
+	ticksPerBeat := int64(PPQ)
+	patternTicks := int64(pat.Length * float64(ticksPerBeat))
+
+	// Read state under lock
+	p.queueMu.RLock()
+	patternStart := p.patternStartTick
+	queuedUntil := p.queuedUntilTick
+	p.queueMu.RUnlock()
+
+	// Calculate when the next pattern boundary occurs
+	ticksSinceStart := atTick - patternStart
+	ticksIntoPattern := ticksSinceStart % patternTicks
+	ticksToNextBoundary := patternTicks - ticksIntoPattern
+	boundaryTick := atTick + ticksToNextBoundary
+
+	needsNotify := false
+
+	// If we've already queued past the boundary, wipe those events
+	if queuedUntil > boundaryTick {
+		p.queueMu.Lock()
+		newQueue := p.queue[:0]
+		for _, e := range p.queue {
+			if e.Tick < boundaryTick {
+				newQueue = append(newQueue, e)
+			}
+		}
+		p.queue = newQueue
+		p.queuedUntilTick = boundaryTick
+		p.nextPatternTick = boundaryTick
+		p.queueMu.Unlock()
+		needsNotify = true
+	} else {
+		p.queueMu.Lock()
+		p.nextPatternTick = boundaryTick
+		p.queueMu.Unlock()
+	}
+
+	// Wake manager outside the lock
+	if needsNotify && p.onQueueChange != nil {
+		p.onQueueChange()
+	}
+}
+
+// CurrentPattern returns the currently playing pattern
+func (p *PianoRollDevice) CurrentPattern() int {
+	return p.state.Pattern
+}
+
+// NextPattern returns the queued pattern (-1 if none)
+func (p *PianoRollDevice) NextPattern() int {
+	if p.nextPatternTick >= 0 {
+		return p.state.Next
+	}
+	return -1
 }
 
 func (p *PianoRollDevice) ContentMask() []bool {
@@ -119,8 +324,8 @@ func (p *PianoRollDevice) HandleMIDI(event midi.Event) {
 	}
 
 	pattern := &p.state.Patterns[p.state.Editing]
-	// Convert step to beat (4 steps per beat)
-	currentBeat := float64(p.state.Step) / 4.0
+	// Get current beat from global tick
+	currentBeat := p.currentBeat()
 
 	// Quantize to nearest 1/16th note
 	quantized := float64(int(currentBeat*4+0.5)) / 4.0
@@ -206,7 +411,7 @@ func (p *PianoRollDevice) View() string {
 		vertMode = "smushed"
 	}
 
-	beat := float64(s.Step) / 4.0
+	beat := p.currentBeat()
 	out := fmt.Sprintf("PIANO  Pattern %d%s  Beat %.1f/%g\n", s.Editing+1, playInfo, beat, pat.Length)
 	out += fmt.Sprintf("View: %s/col %s  Edit: %s horiz, %d semi vert\n\n", formatStep(viewScale), vertMode, formatStep(editH), editV)
 
@@ -346,7 +551,7 @@ func (p *PianoRollDevice) RenderLEDs() []LEDState {
 	basePitch := int(s.CenterPitch) - 4
 	viewScale := ViewScales[s.ViewScale]
 	startBeat := s.CenterBeat - 4*viewScale
-	beat := float64(s.Step) / 4.0
+	beat := p.currentBeat()
 
 	playheadCol := -1
 	if s.Editing == s.Pattern && beat >= startBeat {

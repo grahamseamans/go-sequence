@@ -191,7 +191,7 @@ func LoadProject(projectName, filename string) error {
 
 	// Reset runtime-only fields
 	S.Playing = false
-	S.Step = 0
+	S.Tick = 0
 	for _, track := range S.Tracks {
 		if track.Drum != nil {
 			track.Drum.Step = 0
@@ -203,6 +203,11 @@ func LoadProject(projectName, filename string) error {
 			track.Piano.LastBeat = 0
 			track.Piano.Recording = false
 			track.Piano.Preview = false
+		}
+		if track.Metropolix != nil {
+			// Validate loaded state (clamps values to valid ranges)
+			// NOTE: We do NOT reset playback position - Metropolix resumes exactly where it left off
+			track.Metropolix.Validate()
 		}
 	}
 

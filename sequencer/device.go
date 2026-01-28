@@ -16,27 +16,34 @@ const (
 type DeviceType string
 
 const (
-	DeviceTypeNone     DeviceType = ""
-	DeviceTypeDrum     DeviceType = "Drum"
-	DeviceTypePiano    DeviceType = "Piano"
-	// Future: DeviceTypeMetropolix, DeviceTypeEuclidean, etc.
+	DeviceTypeNone       DeviceType = ""
+	DeviceTypeDrum       DeviceType = "Drum"
+	DeviceTypePiano      DeviceType = "Piano"
+	DeviceTypeMetropolix DeviceType = "Metropolix"
 )
 
 // Device is a musical device that can produce MIDI events
 type Device interface {
-	// Called by Manager every step
-	Tick(step int) []midi.Event
+	// Queue-based playback
+	// Devices maintain their own event queue. Manager calls FillUntil to ensure
+	// the queue has events up to a certain tick, then peeks/pops to dispatch.
+	FillUntil(tick int64)        // Fill queue with events up to tick
+	PeekNextEvent() *midi.Event  // Get next event without removing (nil if empty)
+	PopNextEvent() *midi.Event   // Remove and return next event (nil if empty)
+	ClearQueue()                 // Clear all queued events (for stop/restart)
 
-	// Pattern control (called by SessionDevice)
-	QueuePattern(p int) (pattern, next int) // queue pattern, returns current state
-	ContentMask() []bool                    // which patterns have content
+	// Pattern control - Ableton-style quantized switching
+	QueuePattern(p int, atTick int64) // Queue pattern switch at boundary after atTick
+	CurrentPattern() int              // Currently playing pattern
+	NextPattern() int                 // Queued pattern (-1 if none)
+	ContentMask() []bool              // Which patterns have content
 
-	// External MIDI input (keyboard for recording, etc.)
+	// Live input (bypasses queue - immediate echo + record)
 	HandleMIDI(event midi.Event)
 
 	// Recording control
-	ToggleRecording() // toggle record arm for this device
-	TogglePreview()   // toggle MIDI thru for this device
+	ToggleRecording()
+	TogglePreview()
 	IsRecording() bool
 	IsPreviewing() bool
 

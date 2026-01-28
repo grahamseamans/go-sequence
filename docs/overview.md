@@ -16,6 +16,10 @@ MIDI sequencer/arranger. Not a DAW. A MIDI brain.
 
 ## Architecture
 
+For a deeper, code-aligned explanation of the runtime loops, tick/time model, and the device queue contract, see:
+
+- [Architecture](architecture.md)
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        Manager                          │

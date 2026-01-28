@@ -68,7 +68,7 @@ func Log(category, format string, args ...any) {
 	ts := time.Now().Format("15:04:05.000")
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(file, "[%s] %-10s %s\n", ts, category, msg)
-	file.Sync() // flush immediately so we see logs even on crash
+	// Removed file.Sync() - was blocking 10-100ms per log, causing MIDI lag
 }
 
 // LogEvery logs only every N calls (use for high-frequency events)

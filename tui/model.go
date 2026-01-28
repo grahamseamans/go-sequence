@@ -83,9 +83,7 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.listenForPads())
 	}
 
-	if m.DeviceMgr.GetNoteInput() != nil {
-		cmds = append(cmds, m.listenForNotes())
-	}
+	// MIDI input is now handled by Manager's goroutine, not TUI
 
 	return tea.Batch(cmds...)
 }
@@ -97,19 +95,6 @@ func (m Model) listenForPads() tea.Cmd {
 	return func() tea.Msg {
 		for pad := range m.controller.PadEvents() {
 			m.Manager.HandlePad(pad.Row, pad.Col)
-		}
-		return nil
-	}
-}
-
-func (m Model) listenForNotes() tea.Cmd {
-	noteInput := m.DeviceMgr.GetNoteInput()
-	if noteInput == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		for note := range noteInput.NoteEvents() {
-			m.Manager.HandleNote(note.Note, note.Velocity)
 		}
 		return nil
 	}
@@ -219,11 +204,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case NoteInputResultMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("Note input error: %v", msg.err)
-		} else if m.DeviceMgr.GetNoteInput() != nil {
-			m.statusMsg = "Note input connected"
-			return m, m.listenForNotes()
 		} else {
-			m.statusMsg = "Note input disconnected"
+			// Wire MIDI input to Manager's goroutine
+			noteInput := m.DeviceMgr.GetNoteInput()
+			m.Manager.SetMIDIInput(noteInput)
+			if noteInput != nil {
+				m.statusMsg = "Note input connected"
+			} else {
+				m.statusMsg = "Note input disconnected"
+			}
 		}
 	}
 

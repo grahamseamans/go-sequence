@@ -36,11 +36,15 @@ func (s *SessionDevice) getTrackPatternState(trackIdx int) (pattern, next int) {
 	switch ts.Type {
 	case DeviceTypeDrum:
 		if ts.Drum != nil {
-			return ts.Drum.Pattern, ts.Drum.Next
+			return ts.Drum.PlayingPatternIdx, ts.Drum.Next
 		}
 	case DeviceTypePiano:
 		if ts.Piano != nil {
 			return ts.Piano.Pattern, ts.Piano.Next
+		}
+	case DeviceTypeMetropolix:
+		if ts.Metropolix != nil {
+			return ts.Metropolix.Pattern, ts.Metropolix.Next
 		}
 	}
 	return 0, 0
@@ -50,24 +54,20 @@ func (s *SessionDevice) getTrackPatternState(trackIdx int) (pattern, next int) {
 func (s *SessionDevice) queuePattern(trackIdx, patternIdx int) {
 	dev := s.manager.GetDevice(trackIdx)
 	if dev != nil {
-		dev.QueuePattern(patternIdx)
+		dev.QueuePattern(patternIdx, S.Tick)
 	}
 }
 
-// Device interface implementation
+// Device interface implementation - queue-based (stubs for non-music device)
 
-func (s *SessionDevice) Tick(step int) []midi.Event {
-	// Session doesn't output MIDI
-	return nil
-}
-
-func (s *SessionDevice) QueuePattern(p int) (pattern, next int) {
-	return 0, 0
-}
-
-func (s *SessionDevice) ContentMask() []bool {
-	return make([]bool, NumPatterns)
-}
+func (s *SessionDevice) FillUntil(tick int64)           {}
+func (s *SessionDevice) PeekNextEvent() *midi.Event     { return nil }
+func (s *SessionDevice) PopNextEvent() *midi.Event      { return nil }
+func (s *SessionDevice) ClearQueue()                    {}
+func (s *SessionDevice) QueuePattern(p int, atTick int64) {}
+func (s *SessionDevice) CurrentPattern() int            { return 0 }
+func (s *SessionDevice) NextPattern() int               { return -1 }
+func (s *SessionDevice) ContentMask() []bool            { return make([]bool, NumPatterns) }
 
 func (s *SessionDevice) HandleMIDI(event midi.Event) {
 	if event.Type == midi.NoteOn && int(event.Channel) < 8 {

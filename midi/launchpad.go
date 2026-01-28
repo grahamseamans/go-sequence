@@ -64,6 +64,7 @@ func NewLaunchpadController(id string, inPort drivers.In, outPort drivers.Out) (
 			// Handle note messages (8x8 grid + side buttons)
 			if msg.GetNoteOn(&channel, &note, &velocity) && velocity > 0 {
 				row, col := noteToRowCol(note)
+				debug.Log("lp-in", "NoteOn note=%d -> row=%d col=%d", note, row, col)
 				if row >= 0 {
 					select {
 					case lp.padChan <- PadEvent{Row: row, Col: col, Velocity: velocity}:
@@ -74,6 +75,7 @@ func NewLaunchpadController(id string, inPort drivers.In, outPort drivers.Out) (
 
 			// Handle CC messages (top row buttons CC 91-98)
 			if msg.GetControlChange(&channel, &cc, &value) && value > 0 {
+				debug.Log("lp-in", "CC cc=%d value=%d", cc, value)
 				row, col := ccToRowCol(cc)
 				if row >= 0 {
 					select {
@@ -237,10 +239,15 @@ func noteToRowCol(note uint8) (row, col int) {
 	return row, col
 }
 
-// ccToRowCol converts CC messages to row/col (for top row buttons)
+// ccToRowCol converts CC messages to row/col (for top row and scene buttons)
 func ccToRowCol(cc uint8) (row, col int) {
+	// Top row: CC 91-98 -> row 8, col 0-7
 	if cc >= 91 && cc <= 98 {
 		return 8, int(cc - 91)
+	}
+	// Scene buttons (right column): CC 19,29,39,49,59,69,79,89 -> row 0-7, col 8
+	if cc%10 == 9 && cc >= 19 && cc <= 89 {
+		return int(cc/10) - 1, 8
 	}
 	return -1, -1
 }

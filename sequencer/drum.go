@@ -2,15 +2,31 @@ package sequencer
 
 import (
 	"fmt"
+	"sync"
 
 	"go-sequence/midi"
 	"go-sequence/widgets"
 )
 
+// DrumSchedule tracks what patterns play at what ticks (source of truth for playback)
+type DrumSchedule struct {
+	StartTick int64 // when patterns[0] starts
+	Patterns  []int // pattern indices in order
+}
+
 // DrumDevice reads/writes from central DrumState
 type DrumDevice struct {
 	state       *DrumState
 	previewChan chan int // sends slot index when preview sound should play
+
+	// Schedule - source of truth for what plays when
+	schedule     DrumSchedule
+	patternDirty [NumPatterns]bool // tracks which patterns have been modified
+
+	// Queue - derived from schedule + pattern data
+	queueMu       sync.RWMutex
+	queue         []midi.Event // events sorted by tick
+	onQueueChange func()       // callback to wake manager when queue needs recalc
 
 	// Confirmation dialog
 	confirmMode   bool
@@ -23,7 +39,16 @@ func NewDrumDevice(state *DrumState) *DrumDevice {
 	return &DrumDevice{
 		state:       state,
 		previewChan: make(chan int, 16),
+		schedule: DrumSchedule{
+			StartTick: 0,
+			Patterns:  []int{0}, // start with pattern 0
+		},
 	}
+}
+
+// SetOnQueueChange sets the callback for when the queue needs recalculation
+func (d *DrumDevice) SetOnQueueChange(fn func()) {
+	d.onQueueChange = fn
 }
 
 // PreviewChan returns the channel for preview events (slot indices)
@@ -31,44 +56,256 @@ func (d *DrumDevice) PreviewChan() <-chan int {
 	return d.previewChan
 }
 
-// Device interface implementation
-
-func (d *DrumDevice) Tick(step int) []midi.Event {
-	s := d.state
-	pat := &s.Patterns[s.Pattern]
-	masterLen := pat.MasterLength()
-
-	// Pattern switch at master length boundary
-	if s.Step%masterLen == 0 {
-		s.Pattern = s.Next
-		pat = &s.Patterns[s.Pattern]
+// currentStep returns the current playback step derived from global tick
+func (d *DrumDevice) currentStep() int {
+	ticksPerStep := int64(PPQ / 4)
+	ticksSinceStart := S.Tick - d.schedule.StartTick
+	if ticksSinceStart < 0 {
+		ticksSinceStart = 0
 	}
+	return int(ticksSinceStart / ticksPerStep)
+}
+
+// GeneratePattern generates all MIDI events for a pattern starting at startTick.
+// This is the ONLY place pattern data → events conversion happens.
+func (d *DrumDevice) GeneratePattern(patternNum int, startTick int64) []midi.Event {
+	pat := &d.state.Patterns[patternNum]
+	masterLen := pat.MasterLength()
+	ticksPerStep := int64(PPQ / 4)
 
 	var events []midi.Event
-	for i := 0; i < 16; i++ {
-		track := &pat.Tracks[i]
-		// Each track loops at its own length (polymeters!)
-		trackStep := s.Step % track.Length
-		step := &track.Steps[trackStep]
-		if step.Active {
-			events = append(events, midi.Event{
-				Type:     midi.NoteOn,
-				Note:     uint8(i), // Output slot index, Manager translates via kit
-				Velocity: step.Velocity,
-			})
+
+	// Generate events for each step in the pattern
+	for step := 0; step < masterLen; step++ {
+		stepTick := startTick + int64(step)*ticksPerStep
+
+		// Check all 16 notes at this step
+		for noteIdx := 0; noteIdx < 16; noteIdx++ {
+			note := &pat.Notes[noteIdx]
+			// Each note loops at its own length (polymeters)
+			noteStep := step % note.Length
+			s := &note.Steps[noteStep]
+			if s.Active {
+				events = append(events, midi.Event{
+					Tick:     stepTick,
+					Type:     midi.Trigger,
+					Note:     uint8(noteIdx), // Manager translates via kit
+					Velocity: s.Velocity,
+				})
+			}
 		}
 	}
 
-	// Keep counting - don't reset at masterLen (breaks polymeters)
-	s.Step = (s.Step + 1) % 65536
 	return events
 }
 
-func (d *DrumDevice) QueuePattern(p int) (pattern, next int) {
-	if p >= 0 && p < NumPatterns {
-		d.state.Next = p
+// patternLengthTicks returns the length of a pattern in ticks
+func (d *DrumDevice) patternLengthTicks(patternNum int) int64 {
+	pat := &d.state.Patterns[patternNum]
+	return int64(pat.MasterLength()) * (PPQ / 4)
+}
+
+// --- Schedule helpers ---
+
+// scheduleEndTick returns the tick where the current schedule ends
+func (d *DrumDevice) scheduleEndTick() int64 {
+	tick := d.schedule.StartTick
+	for _, patIdx := range d.schedule.Patterns {
+		tick += d.patternLengthTicks(patIdx)
 	}
-	return d.state.Pattern, d.state.Next
+	return tick
+}
+
+// extendSchedule ensures the schedule covers at least until targetTick
+func (d *DrumDevice) extendSchedule(targetTick int64) {
+	for d.scheduleEndTick() < targetTick {
+		// Append the last pattern (or pattern 0 if empty)
+		lastPat := 0
+		if len(d.schedule.Patterns) > 0 {
+			lastPat = d.schedule.Patterns[len(d.schedule.Patterns)-1]
+		}
+		d.schedule.Patterns = append(d.schedule.Patterns, lastPat)
+	}
+}
+
+// trimSchedule drops patterns that are entirely behind the playhead
+func (d *DrumDevice) trimSchedule(currentTick int64) {
+	for len(d.schedule.Patterns) > 1 {
+		firstPatLen := d.patternLengthTicks(d.schedule.Patterns[0])
+		if d.schedule.StartTick+firstPatLen <= currentTick {
+			// First pattern is entirely in the past - drop it
+			d.schedule.StartTick += firstPatLen
+			d.schedule.Patterns = d.schedule.Patterns[1:]
+		} else {
+			break
+		}
+	}
+}
+
+// scheduleContainsDirty checks if any dirty pattern is in the schedule
+func (d *DrumDevice) scheduleContainsDirty() bool {
+	for _, patIdx := range d.schedule.Patterns {
+		if d.patternDirty[patIdx] {
+			return true
+		}
+	}
+	return false
+}
+
+// clearDirtyFlags clears all pattern dirty flags
+func (d *DrumDevice) clearDirtyFlags() {
+	for i := range d.patternDirty {
+		d.patternDirty[i] = false
+	}
+}
+
+// syncQueueToSchedule regenerates the queue from the schedule
+// This is the single function that reconciles queue with schedule
+func (d *DrumDevice) syncQueueToSchedule() {
+	// Check if we have work to do
+	if !d.scheduleContainsDirty() {
+		return
+	}
+
+	// Generate all events from schedule
+	var newQueue []midi.Event
+	tick := d.schedule.StartTick
+	for _, patIdx := range d.schedule.Patterns {
+		events := d.GeneratePattern(patIdx, tick)
+		newQueue = append(newQueue, events...)
+		tick += d.patternLengthTicks(patIdx)
+	}
+
+	// Update playing pattern index to match schedule
+	if len(d.schedule.Patterns) > 0 {
+		d.state.PlayingPatternIdx = d.schedule.Patterns[0]
+	}
+
+	// Swap in new queue
+	d.queueMu.Lock()
+	d.queue = newQueue
+	d.queueMu.Unlock()
+
+	// Clear dirty flags
+	d.clearDirtyFlags()
+
+	// Wake manager
+	if d.onQueueChange != nil {
+		d.onQueueChange()
+	}
+}
+
+// Device interface implementation - queue-based
+
+// FillUntil fills the event queue with events up to the given tick
+func (d *DrumDevice) FillUntil(tick int64) {
+	// Trim old patterns behind playhead
+	d.trimSchedule(S.Tick)
+
+	// Extend schedule to cover requested tick
+	d.extendSchedule(tick)
+
+	// Mark all scheduled patterns as dirty to force regeneration
+	// (This ensures the queue gets built if it was empty)
+	for _, patIdx := range d.schedule.Patterns {
+		d.patternDirty[patIdx] = true
+	}
+
+	// Sync queue to schedule
+	d.syncQueueToSchedule()
+}
+
+// PeekNextEvent returns the next event without removing it
+func (d *DrumDevice) PeekNextEvent() *midi.Event {
+	d.queueMu.RLock()
+	defer d.queueMu.RUnlock()
+
+	if len(d.queue) == 0 {
+		return nil
+	}
+	return &d.queue[0]
+}
+
+// PopNextEvent removes and returns the next event
+func (d *DrumDevice) PopNextEvent() *midi.Event {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+
+	if len(d.queue) == 0 {
+		return nil
+	}
+	event := d.queue[0]
+	d.queue = d.queue[1:]
+	return &event
+}
+
+// ClearQueue clears all queued events (for stop/restart)
+func (d *DrumDevice) ClearQueue() {
+	d.queueMu.Lock()
+	d.queue = nil
+	d.queueMu.Unlock()
+
+	// Reset schedule to start fresh
+	d.schedule.StartTick = 0
+	d.schedule.Patterns = []int{d.state.PlayingPatternIdx}
+	d.clearDirtyFlags()
+}
+
+// QueuePattern queues a pattern change at the next boundary after atTick
+func (d *DrumDevice) QueuePattern(p int, atTick int64) {
+	if p < 0 || p >= NumPatterns {
+		return
+	}
+	d.state.Next = p
+
+	// First, extend schedule to cover atTick if needed
+	d.extendSchedule(atTick)
+
+	// Find which schedule slot contains atTick, then replace everything after with new pattern
+	tick := d.schedule.StartTick
+	foundSlot := false
+	for i, patIdx := range d.schedule.Patterns {
+		patLen := d.patternLengthTicks(patIdx)
+		if tick+patLen > atTick {
+			// atTick is within this pattern - replace from next slot onward
+			nextSlot := i + 1
+			if nextSlot < len(d.schedule.Patterns) {
+				// Replace remaining slots with new pattern
+				for j := nextSlot; j < len(d.schedule.Patterns); j++ {
+					d.schedule.Patterns[j] = p
+				}
+			} else {
+				// No more slots - append the new pattern
+				d.schedule.Patterns = append(d.schedule.Patterns, p)
+			}
+			foundSlot = true
+			break
+		}
+		tick += patLen
+	}
+
+	// If atTick was beyond all patterns (shouldn't happen after extendSchedule, but be safe)
+	if !foundSlot {
+		d.schedule.Patterns = append(d.schedule.Patterns, p)
+	}
+
+	// Mark new pattern as dirty and sync
+	d.patternDirty[p] = true
+	d.syncQueueToSchedule()
+}
+
+// CurrentPattern returns the currently playing pattern
+func (d *DrumDevice) CurrentPattern() int {
+	return d.state.PlayingPatternIdx
+}
+
+// NextPattern returns the queued pattern (-1 if none)
+func (d *DrumDevice) NextPattern() int {
+	// Check if there's a different pattern scheduled after the current one
+	if len(d.schedule.Patterns) > 1 && d.schedule.Patterns[1] != d.schedule.Patterns[0] {
+		return d.schedule.Patterns[1]
+	}
+	return -1
 }
 
 func (d *DrumDevice) ContentMask() []bool {
@@ -76,8 +313,8 @@ func (d *DrumDevice) ContentMask() []bool {
 	for i := range d.state.Patterns {
 		pat := &d.state.Patterns[i]
 		for t := 0; t < 16; t++ {
-			for s := 0; s < pat.Tracks[t].Length; s++ {
-				if pat.Tracks[t].Steps[s].Active {
+			for s := 0; s < pat.Notes[t].Length; s++ {
+				if pat.Notes[t].Steps[s].Active {
 					mask[i] = true
 					break
 				}
@@ -90,8 +327,32 @@ func (d *DrumDevice) ContentMask() []bool {
 	return mask
 }
 
+// HandleMIDI handles incoming MIDI for recording
 func (d *DrumDevice) HandleMIDI(event midi.Event) {
-	// TODO: record mode - quantize incoming hits to steps
+	if !d.state.Recording || !S.Playing {
+		return
+	}
+
+	// Only handle note-on with velocity
+	if event.Type != midi.NoteOn || event.Velocity == 0 {
+		return
+	}
+
+	// Find which note this MIDI note maps to (via kit reverse lookup would be ideal,
+	// for now just use note as index if in range)
+	noteIdx := int(event.Note)
+	if noteIdx >= 16 {
+		return
+	}
+
+	// Calculate step from the tick passed in the event
+	ticksSinceStart := event.Tick - d.schedule.StartTick
+	ticksPerStep := int64(PPQ / 4)
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	step := int((ticksSinceStart / ticksPerStep) % int64(pat.Notes[noteIdx].Length))
+
+	// Use SetStep to write to the editing pattern
+	d.SetStep(noteIdx, step, event.Velocity)
 }
 
 func (d *DrumDevice) ToggleRecording() {
@@ -110,18 +371,81 @@ func (d *DrumDevice) IsPreviewing() bool {
 	return d.state.Preview
 }
 
+// --- Core Edit Functions ---
+// All operate on EditingPatternIdx
+
+// ToggleStep toggles a step on/off for a given note
+func (d *DrumDevice) ToggleStep(note, step int) {
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	if note < 0 || note >= 16 || step < 0 || step >= pat.Notes[note].Length {
+		return
+	}
+	pat.Notes[note].Steps[step].Active = !pat.Notes[note].Steps[step].Active
+	d.patternDirty[d.state.EditingPatternIdx] = true
+	d.syncQueueToSchedule()
+}
+
+// SetStep sets a step to active with a given velocity (for MIDI recording)
+func (d *DrumDevice) SetStep(note, step int, velocity uint8) {
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	if note < 0 || note >= 16 || step < 0 || step >= pat.Notes[note].Length {
+		return
+	}
+	pat.Notes[note].Steps[step].Active = true
+	pat.Notes[note].Steps[step].Velocity = velocity
+	d.patternDirty[d.state.EditingPatternIdx] = true
+	d.syncQueueToSchedule()
+}
+
+// SetNoteLaneLength sets the length of a note lane
+func (d *DrumDevice) SetNoteLaneLength(note, length int) {
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	if note < 0 || note >= 16 || length < 1 || length > 32 {
+		return
+	}
+	pat.Notes[note].Length = length
+	d.patternDirty[d.state.EditingPatternIdx] = true
+	d.syncQueueToSchedule()
+}
+
+// ClearNote clears all steps in a note lane
+func (d *DrumDevice) ClearNote(note int) {
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	if note < 0 || note >= 16 {
+		return
+	}
+	for step := 0; step < 32; step++ {
+		pat.Notes[note].Steps[step].Active = false
+	}
+	d.patternDirty[d.state.EditingPatternIdx] = true
+	d.syncQueueToSchedule()
+}
+
+// ClearEditingPattern clears all notes in the editing pattern
+func (d *DrumDevice) ClearEditingPattern() {
+	pat := &d.state.Patterns[d.state.EditingPatternIdx]
+	for n := 0; n < 16; n++ {
+		for step := 0; step < 32; step++ {
+			pat.Notes[n].Steps[step].Active = false
+		}
+	}
+	d.patternDirty[d.state.EditingPatternIdx] = true
+	d.syncQueueToSchedule()
+}
+
 func (d *DrumDevice) View() string {
 	s := d.state
-	pat := &s.Patterns[s.Editing]
+	pat := &s.Patterns[s.EditingPatternIdx]
 
 	// Header - show editing vs playing
 	playInfo := ""
-	if s.Editing != s.Pattern {
-		playInfo = fmt.Sprintf(" (playing:%d)", s.Pattern)
+	if s.EditingPatternIdx != s.PlayingPatternIdx {
+		playInfo = fmt.Sprintf(" (playing:%d)", s.PlayingPatternIdx)
 	}
-	selectedTrack := &pat.Tracks[s.Selected]
-	selectedStep := s.Step % selectedTrack.Length
-	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Track %d\n\n", s.Editing+1, playInfo, selectedStep+1, selectedTrack.Length, s.Selected+1)
+	selectedNote := &pat.Notes[s.SelectedNoteIdx]
+	currentStep := d.currentStep()
+	selectedStep := currentStep % selectedNote.Length
+	out := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Note %d\n\n", s.EditingPatternIdx+1, playInfo, selectedStep+1, selectedNote.Length, s.SelectedNoteIdx+1)
 
 	// Confirmation dialog takes over
 	if d.confirmMode {
@@ -133,28 +457,28 @@ func (d *DrumDevice) View() string {
 	}
 
 	// 16x32 grid - single char per cell
-	for t := 0; t < 16; t++ {
-		track := &pat.Tracks[t]
-		trackStep := s.Step % track.Length
-		out += fmt.Sprintf("%2d ", t+1)
+	for n := 0; n < 16; n++ {
+		note := &pat.Notes[n]
+		noteStep := currentStep % note.Length
+		out += fmt.Sprintf("%2d ", n+1)
 
 		for step := 0; step < 32; step++ {
-			isCursor := t == s.Selected && step == s.Cursor
+			isCursor := n == s.SelectedNoteIdx && step == s.Cursor
 
 			var char string
-			if step >= track.Length {
+			if step >= note.Length {
 				if isCursor {
 					char = "□"
 				} else {
 					char = "-"
 				}
-			} else if step == trackStep {
+			} else if step == noteStep {
 				if isCursor {
 					char = "▷"
 				} else {
 					char = "▶"
 				}
-			} else if track.Steps[step].Active {
+			} else if note.Steps[step].Active {
 				if isCursor {
 					char = "◉"
 				} else {
@@ -178,10 +502,10 @@ func (d *DrumDevice) View() string {
 	out += widgets.RenderKeyHelp([]widgets.KeySection{
 		{Keys: []widgets.KeyBinding{
 			{Key: "h / l", Desc: "move cursor left/right through steps"},
-			{Key: "j / k", Desc: "select track up/down"},
+			{Key: "j / k", Desc: "select note up/down"},
 			{Key: "space", Desc: "toggle step on/off"},
-			{Key: "[ / ]", Desc: "shorten/lengthen track"},
-			{Key: "c", Desc: "clear current track"},
+			{Key: "[ / ]", Desc: "shorten/lengthen note lane"},
+			{Key: "c", Desc: "clear current note"},
 			{Key: "< / >", Desc: "previous/next pattern"},
 		}},
 	})
@@ -196,21 +520,22 @@ func (d *DrumDevice) View() string {
 func (d *DrumDevice) RenderLEDs() []LEDState {
 	var leds []LEDState
 	s := d.state
-	pat := &s.Patterns[s.Editing]
-	track := &pat.Tracks[s.Selected]
+	pat := &s.Patterns[s.EditingPatternIdx]
+	selectedNote := &pat.Notes[s.SelectedNoteIdx]
 
 	// Colors
 	stepsColor := [3]uint8{234, 73, 116}
 	stepsEmpty := [3]uint8{80, 30, 50}
-	trackHasContent := [3]uint8{148, 18, 126}
-	trackEmpty := [3]uint8{40, 10, 30}
-	trackSelected := [3]uint8{255, 255, 255}
+	noteHasContent := [3]uint8{148, 18, 126}
+	noteEmpty := [3]uint8{40, 10, 30}
+	noteSelected := [3]uint8{255, 255, 255}
 	commandsColor := [3]uint8{253, 157, 110}
 	playheadColor := [3]uint8{255, 255, 255}
 	offColor := [3]uint8{0, 0, 0}
 
-	// Top 4 rows (rows 4-7): steps for selected track
-	trackStep := s.Step % track.Length
+	// Top 4 rows (rows 4-7): steps for selected note
+	currentStep := d.currentStep()
+	noteStep := currentStep % selectedNote.Length
 	for stepIdx := 0; stepIdx < 32; stepIdx++ {
 		row := 7 - (stepIdx / 8)
 		col := stepIdx % 8
@@ -218,12 +543,12 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 		var color [3]uint8 = offColor
 		var channel uint8 = midi.ChannelStatic
 
-		if stepIdx >= track.Length {
+		if stepIdx >= selectedNote.Length {
 			color = offColor
-		} else if stepIdx == trackStep {
+		} else if stepIdx == noteStep {
 			color = playheadColor
 			channel = midi.ChannelPulse
-		} else if track.Steps[stepIdx].Active {
+		} else if selectedNote.Steps[stepIdx].Active {
 			color = stepsColor
 		} else {
 			color = stepsEmpty
@@ -232,34 +557,34 @@ func (d *DrumDevice) RenderLEDs() []LEDState {
 		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: channel})
 	}
 
-	// Bottom-left 4x4: track select
-	for t := 0; t < 16; t++ {
-		row := t / 4
-		col := t % 4
+	// Bottom-left 4x4: note select
+	for n := 0; n < 16; n++ {
+		row := n / 4
+		col := n % 4
 
 		hasContent := false
-		for step := 0; step < pat.Tracks[t].Length; step++ {
-			if pat.Tracks[t].Steps[step].Active {
+		for step := 0; step < pat.Notes[n].Length; step++ {
+			if pat.Notes[n].Steps[step].Active {
 				hasContent = true
 				break
 			}
 		}
 
 		var color [3]uint8
-		if t == s.Selected {
-			color = trackSelected
+		if n == s.SelectedNoteIdx {
+			color = noteSelected
 		} else if hasContent {
-			color = trackHasContent
+			color = noteHasContent
 		} else {
-			color = trackEmpty
+			color = noteEmpty
 		}
 
 		leds = append(leds, LEDState{Row: row, Col: col, Color: color, Channel: midi.ChannelStatic})
 	}
 
 	// Bottom-right 4x4: commands
-	previewActive := [3]uint8{0, 255, 0}   // green when on
-	recordActive := [3]uint8{255, 0, 0}    // red when on
+	previewActive := [3]uint8{0, 255, 0} // green when on
+	recordActive := [3]uint8{255, 0, 0}  // red when on
 	for row := 0; row < 4; row++ {
 		for col := 4; col < 8; col++ {
 			color := commandsColor
@@ -301,8 +626,8 @@ func (d *DrumDevice) HandleKey(key string) {
 	}
 
 	s := d.state
-	pat := &s.Patterns[s.Editing]
-	track := &pat.Tracks[s.Selected]
+	pat := &s.Patterns[s.EditingPatternIdx]
+	note := &pat.Notes[s.SelectedNoteIdx]
 
 	switch key {
 	case "h", "left":
@@ -310,62 +635,62 @@ func (d *DrumDevice) HandleKey(key string) {
 			s.Cursor--
 		}
 	case "l", "right":
-		if s.Cursor < track.Length-1 {
+		if s.Cursor < note.Length-1 {
 			s.Cursor++
 		}
 	case " ":
-		if s.Cursor < track.Length {
-			track.Steps[s.Cursor].Active = !track.Steps[s.Cursor].Active
-		}
+		d.ToggleStep(s.SelectedNoteIdx, s.Cursor)
 	case "j", "down":
-		if s.Selected < 15 {
-			s.Selected++
-			if s.Cursor >= s.Patterns[s.Editing].Tracks[s.Selected].Length {
-				s.Cursor = s.Patterns[s.Editing].Tracks[s.Selected].Length - 1
+		if s.SelectedNoteIdx < 15 {
+			s.SelectedNoteIdx++
+			if s.Cursor >= s.Patterns[s.EditingPatternIdx].Notes[s.SelectedNoteIdx].Length {
+				s.Cursor = s.Patterns[s.EditingPatternIdx].Notes[s.SelectedNoteIdx].Length - 1
 			}
 		}
 	case "k", "up":
-		if s.Selected > 0 {
-			s.Selected--
-			if s.Cursor >= s.Patterns[s.Editing].Tracks[s.Selected].Length {
-				s.Cursor = s.Patterns[s.Editing].Tracks[s.Selected].Length - 1
+		if s.SelectedNoteIdx > 0 {
+			s.SelectedNoteIdx--
+			if s.Cursor >= s.Patterns[s.EditingPatternIdx].Notes[s.SelectedNoteIdx].Length {
+				s.Cursor = s.Patterns[s.EditingPatternIdx].Notes[s.SelectedNoteIdx].Length - 1
 			}
 		}
 	case "[":
-		if track.Length > 1 {
-			track.Length--
-			if s.Cursor >= track.Length {
-				s.Cursor = track.Length - 1
+		if note.Length > 1 {
+			newLen := note.Length - 1
+			d.SetNoteLaneLength(s.SelectedNoteIdx, newLen)
+			if s.Cursor >= newLen {
+				s.Cursor = newLen - 1
 			}
 		}
 	case "]":
-		if track.Length < 32 {
-			track.Length++
+		if note.Length < 32 {
+			d.SetNoteLaneLength(s.SelectedNoteIdx, note.Length+1)
 		}
 	case "c":
-		d.confirmClearTrack()
+		d.confirmClearNote()
 	case "C":
 		d.confirmClearPattern()
 	case "<", ",":
-		if s.Editing > 0 {
-			s.Editing--
+		if s.EditingPatternIdx > 0 {
+			s.EditingPatternIdx--
 		}
 	case ">", ".":
-		if s.Editing < NumPatterns-1 {
-			s.Editing++
+		if s.EditingPatternIdx < NumPatterns-1 {
+			s.EditingPatternIdx++
 		}
 	}
 }
 
-func (d *DrumDevice) confirmClearTrack() {
+func (d *DrumDevice) confirmClearNote() {
 	s := d.state
-	pat := &s.Patterns[s.Editing]
-	track := &pat.Tracks[s.Selected]
+	pat := &s.Patterns[s.EditingPatternIdx]
+	note := &pat.Notes[s.SelectedNoteIdx]
+	noteIdx := s.SelectedNoteIdx // capture for closure
 
-	// Check if track has any content
+	// Check if note has any content
 	hasContent := false
-	for i := 0; i < track.Length; i++ {
-		if track.Steps[i].Active {
+	for i := 0; i < note.Length; i++ {
+		if note.Steps[i].Active {
 			hasContent = true
 			break
 		}
@@ -374,24 +699,22 @@ func (d *DrumDevice) confirmClearTrack() {
 		return // nothing to clear
 	}
 
-	d.confirmMsg = fmt.Sprintf("Clear track %d?", s.Selected+1)
+	d.confirmMsg = fmt.Sprintf("Clear note %d?", noteIdx+1)
 	d.confirmAction = func() {
-		for step := 0; step < 32; step++ {
-			track.Steps[step].Active = false
-		}
+		d.ClearNote(noteIdx)
 	}
 	d.confirmMode = true
 }
 
 func (d *DrumDevice) confirmClearPattern() {
 	s := d.state
-	pat := &s.Patterns[s.Editing]
+	pat := &s.Patterns[s.EditingPatternIdx]
 
 	// Check if pattern has any content
 	hasContent := false
-	for t := 0; t < 16 && !hasContent; t++ {
-		for step := 0; step < pat.Tracks[t].Length; step++ {
-			if pat.Tracks[t].Steps[step].Active {
+	for n := 0; n < 16 && !hasContent; n++ {
+		for step := 0; step < pat.Notes[n].Length; step++ {
+			if pat.Notes[n].Steps[step].Active {
 				hasContent = true
 				break
 			}
@@ -401,56 +724,51 @@ func (d *DrumDevice) confirmClearPattern() {
 		return // nothing to clear
 	}
 
-	d.confirmMsg = fmt.Sprintf("Clear pattern %d?", s.Editing+1)
+	d.confirmMsg = fmt.Sprintf("Clear pattern %d?", s.EditingPatternIdx+1)
 	d.confirmAction = func() {
-		for t := 0; t < 16; t++ {
-			for step := 0; step < 32; step++ {
-				pat.Tracks[t].Steps[step].Active = false
-			}
-		}
+		d.ClearEditingPattern()
 	}
 	d.confirmMode = true
 }
 
 func (d *DrumDevice) HandlePad(row, col int) {
 	s := d.state
-	pat := &s.Patterns[s.Editing]
+	pat := &s.Patterns[s.EditingPatternIdx]
 
 	// Top 4 rows: step toggle
 	if row >= 4 && row <= 7 {
 		stepIdx := (7-row)*8 + col
-		track := &pat.Tracks[s.Selected]
-		if stepIdx < track.Length {
-			track.Steps[stepIdx].Active = !track.Steps[stepIdx].Active
+		note := &pat.Notes[s.SelectedNoteIdx]
+		if stepIdx < note.Length {
+			d.ToggleStep(s.SelectedNoteIdx, stepIdx)
 			s.Cursor = stepIdx
 		}
 		return
 	}
 
-	// Bottom-left 4x4: track select (and record/preview)
+	// Bottom-left 4x4: note select (and record/preview)
 	if row < 4 && col < 4 {
-		trackIdx := row*4 + col
-		if trackIdx < 16 {
-			// Always select the track
-			s.Selected = trackIdx
-			if s.Cursor >= pat.Tracks[s.Selected].Length {
-				s.Cursor = pat.Tracks[s.Selected].Length - 1
+		noteIdx := row*4 + col
+		if noteIdx < 16 {
+			// Always select the note
+			s.SelectedNoteIdx = noteIdx
+			if s.Cursor >= pat.Notes[s.SelectedNoteIdx].Length {
+				s.Cursor = pat.Notes[s.SelectedNoteIdx].Length - 1
 			}
 
 			// If preview mode, play the sound
 			if s.Preview {
 				select {
-				case d.previewChan <- trackIdx:
+				case d.previewChan <- noteIdx:
 				default:
 				}
 			}
 
-			// If recording while playing, write a step at current position
+			// If recording while playing, toggle step at current position
 			if s.Recording && S.Playing {
-				track := &pat.Tracks[trackIdx]
-				stepIdx := s.Step % track.Length
-				track.Steps[stepIdx].Active = true
-				track.Steps[stepIdx].Velocity = 100 // default velocity
+				note := &pat.Notes[noteIdx]
+				stepIdx := d.currentStep() % note.Length
+				d.ToggleStep(noteIdx, stepIdx)
 			}
 		}
 		return
@@ -458,24 +776,25 @@ func (d *DrumDevice) HandlePad(row, col int) {
 
 	// Bottom-right 4x4: command pads
 	if row < 4 && col >= 4 {
-		track := &pat.Tracks[s.Selected]
+		note := &pat.Notes[s.SelectedNoteIdx]
 		switch {
-		// Row 0: Clear Track, Clear Pattern, Copy, Paste
-		case row == 0 && col == 4: // Clear Track
-			d.confirmClearTrack()
+		// Row 0: Clear Note, Clear Pattern, Copy, Paste
+		case row == 0 && col == 4: // Clear Note
+			d.confirmClearNote()
 		case row == 0 && col == 5: // Clear Pattern
 			d.confirmClearPattern()
 		// Row 1: Nudge Left, Nudge Right, Length -, Length +
 		case row == 1 && col == 6: // Length -
-			if track.Length > 1 {
-				track.Length--
-				if s.Cursor >= track.Length {
-					s.Cursor = track.Length - 1
+			if note.Length > 1 {
+				newLen := note.Length - 1
+				d.SetNoteLaneLength(s.SelectedNoteIdx, newLen)
+				if s.Cursor >= newLen {
+					s.Cursor = newLen - 1
 				}
 			}
 		case row == 1 && col == 7: // Length +
-			if track.Length < 32 {
-				track.Length++
+			if note.Length < 32 {
+				d.SetNoteLaneLength(s.SelectedNoteIdx, note.Length+1)
 			}
 		// Row 3: Preview, Record, Mute, Solo
 		case row == 3 && col == 4: // Preview toggle
@@ -491,7 +810,7 @@ func (d *DrumDevice) renderLaunchpadHelp() string {
 	// Colors
 	topRowColor := [3]uint8{111, 10, 126}
 	stepsColor := [3]uint8{234, 73, 116}
-	trackColor := [3]uint8{148, 18, 126}
+	noteColor := [3]uint8{148, 18, 126}
 	commandsColor := [3]uint8{253, 157, 110}
 	sceneColor := [3]uint8{71, 13, 121}
 
@@ -506,10 +825,10 @@ func (d *DrumDevice) renderLaunchpadHelp() string {
 		}
 	}
 
-	// Bottom-left 4x4: track select
+	// Bottom-left 4x4: note select
 	for row := 0; row < 4; row++ {
 		for col := 0; col < 4; col++ {
-			grid[row][col] = trackColor
+			grid[row][col] = noteColor
 		}
 	}
 
@@ -536,12 +855,12 @@ func (d *DrumDevice) renderLaunchpadHelp() string {
 
 	// Legend
 	out += widgets.RenderLegendItem(stepsColor, "Steps", "tap to toggle steps 1-32") + "\n"
-	out += widgets.RenderLegendItem(trackColor, "Track", "select track 1-16 (plays sound in preview mode)") + "\n"
+	out += widgets.RenderLegendItem(noteColor, "Note", "select note 1-16 (plays sound in preview mode)") + "\n"
 	out += widgets.RenderLegendItem(commandsColor, "Commands", "") + "\n"
 	out += `    Row 3: [Preview] [Record]  (Mute)   (Solo)
     Row 2: (Vel -)   (Vel +)   (-)      (-)
     Row 1: (Nudge<)  (Nudge>)  [Len -]  [Len +]
-    Row 0: [ClrTrk]  [ClrPat]  (Copy)   (Paste)
+    Row 0: [ClrNote] [ClrPat]  (Copy)   (Paste)
     [ ] = implemented, ( ) = not yet` + "\n"
 	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch scenes")
 

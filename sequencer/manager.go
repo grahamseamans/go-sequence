@@ -25,15 +25,20 @@ type Manager struct {
 
 	controller midi.Controller
 
-	stopChan chan struct{}
-	mu       sync.Mutex
+	stopChan      chan struct{}
+	interruptChan chan struct{} // signal dispatch loop to recalculate (queue changed)
+	mu            sync.RWMutex  // RWMutex for concurrent reads in midiOutputLoop
 
 	focused Device // which device gets UI/input
 
+	// MIDI input
+	midiInputChan     chan midi.NoteEvent
+	midiInputStopChan chan struct{}
+
 	// LED rendering at fixed FPS
-	ledDirty    bool                   // true if LEDs need refresh
-	prevLEDs    map[[2]int]LEDState    // for diffing
-	ledStopChan chan struct{}          // stop the LED loop
+	ledDirty    bool                // true if LEDs need refresh
+	prevLEDs    map[[2]int]LEDState // for diffing
+	ledStopChan chan struct{}       // stop the LED loop
 
 	// Notify TUI of updates
 	UpdateChan chan struct{}
@@ -50,14 +55,45 @@ func NewManager() *Manager {
 		ledStopChan: make(chan struct{}),
 		UpdateChan:  make(chan struct{}, 1),
 	}
-	go m.ledLoop()
 	return m
 }
 
-// SetDevice assigns a device to a slot
+// StartRuntime starts all runtime goroutines (called once at startup)
+func (m *Manager) StartRuntime() {
+	// Initialize channels
+	m.midiInputChan = make(chan midi.NoteEvent, 32)
+	m.midiInputStopChan = make(chan struct{})
+	m.stopChan = make(chan struct{})
+	m.interruptChan = make(chan struct{}, 1)
+
+	// Start all 5 goroutines
+	go m.ledLoop()          // LED updates
+	go m.midiInputLoop()    // MIDI keyboard input
+	go m.queueManagerLoop() // Queue filling
+	go m.midiOutputLoop()   // MIDI output
+}
+
+// SetDevice assigns a device to a slot and wires up callbacks
 func (m *Manager) SetDevice(idx int, d Device) {
 	if idx >= 0 && idx < 8 {
 		m.devices[idx] = d
+		m.wireDeviceCallbacks(d)
+	}
+}
+
+// wireDeviceCallbacks sets up the onQueueChange callback for a device
+func (m *Manager) wireDeviceCallbacks(d Device) {
+	if d == nil {
+		return
+	}
+	// Type assert to set callback - each device type has SetOnQueueChange
+	switch dev := d.(type) {
+	case *DrumDevice:
+		dev.SetOnQueueChange(m.interrupt)
+	case *PianoRollDevice:
+		dev.SetOnQueueChange(m.interrupt)
+	case *MetropolixDevice:
+		dev.SetOnQueueChange(m.interrupt)
 	}
 }
 
@@ -114,7 +150,23 @@ func (m *Manager) CreateEmptyDevice(trackIdx int) Device {
 	ts.Type = DeviceTypeNone
 	ts.Drum = nil
 	ts.Piano = nil
+	ts.Metropolix = nil
 	return NewEmptyDevice(trackIdx + 1)
+}
+
+// CreateMetropolixDevice creates a MetropolixDevice wired to the given track's state
+func (m *Manager) CreateMetropolixDevice(trackIdx int) Device {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return nil
+	}
+	ts := S.Tracks[trackIdx]
+	if ts.Metropolix == nil {
+		ts.Metropolix = NewMetropolixState()
+	}
+	ts.Type = DeviceTypeMetropolix
+	ts.Drum = nil // clear other device state
+	ts.Piano = nil
+	return NewMetropolixDevice(ts.Metropolix)
 }
 
 // recreateDevicesFromState rebuilds all devices from the loaded state
@@ -127,10 +179,12 @@ func (m *Manager) recreateDevicesFromState() {
 			dev = NewDrumDevice(ts.Drum)
 		case DeviceTypePiano:
 			dev = NewPianoRollDevice(ts.Piano)
+		case DeviceTypeMetropolix:
+			dev = NewMetropolixDevice(ts.Metropolix)
 		default:
 			dev = NewEmptyDevice(i + 1)
 		}
-		m.devices[i] = dev
+		m.SetDevice(i, dev) // Use SetDevice to wire callbacks
 	}
 	// Focus session after loading
 	m.SetFocused(m.session)
@@ -302,6 +356,9 @@ func (m *Manager) FocusSave() {
 	}
 }
 
+// Look-ahead for queue filling (in ticks) - about 100ms worth at 120 BPM
+const lookAheadTicks = PPQ / 2
+
 // Play starts playback
 func (m *Manager) Play() {
 	m.mu.Lock()
@@ -309,11 +366,22 @@ func (m *Manager) Play() {
 		m.mu.Unlock()
 		return
 	}
+
+	// Initialize timing
 	S.Playing = true
-	m.stopChan = make(chan struct{})
+	S.T0 = time.Now()
+	S.Tick = 0
+
+	// Clear and initialize all device queues
+	for _, dev := range m.devices {
+		if dev != nil {
+			dev.ClearQueue()
+		}
+	}
 	m.mu.Unlock()
 
-	go m.tickLoop()
+	// Goroutines already running, just signal to start filling
+	m.interrupt()
 }
 
 // Stop stops playback
@@ -324,39 +392,122 @@ func (m *Manager) Stop() {
 		return
 	}
 	S.Playing = false
-	close(m.stopChan)
+
+	// Clear all device queues
+	for _, dev := range m.devices {
+		if dev != nil {
+			dev.ClearQueue()
+		}
+	}
+	// Don't stop goroutines - they keep running, just no playback
 }
 
-func (m *Manager) tickLoop() {
-	runtime.LockOSThread() // Pin to OS thread for consistent scheduling
-	defer runtime.UnlockOSThread()
+// interrupt signals the dispatch loop to recalculate (called when queues change)
+func (m *Manager) interrupt() {
+	select {
+	case m.interruptChan <- struct{}{}:
+	default:
+	}
+}
 
-	// Capture tempo at start (changes apply on next play)
+// midiInputLoop consumes MIDI keyboard input and routes to devices
+func (m *Manager) midiInputLoop() {
+	for {
+		select {
+		case <-m.midiInputStopChan:
+			return
+		case evt := <-m.midiInputChan:
+			// HandleNote does immediate echo + routes to device
+			m.HandleNote(evt.Note, evt.Velocity)
+		}
+	}
+}
+
+// SetMIDIInput sets the MIDI keyboard input source
+func (m *Manager) SetMIDIInput(ctrl midi.Controller) {
+	if ctrl == nil {
+		// Stop existing loop
+		if m.midiInputStopChan != nil {
+			close(m.midiInputStopChan)
+			m.midiInputStopChan = make(chan struct{})
+		}
+		return
+	}
+
+	// Start consuming from controller
+	go func() {
+		for evt := range ctrl.NoteEvents() {
+			select {
+			case m.midiInputChan <- evt:
+			default:
+				// Drop if channel full
+			}
+		}
+	}()
+}
+
+// fillQueues fills all device queues up to horizon
+func (m *Manager) fillQueues() {
 	m.mu.Lock()
-	tempo := S.Tempo
+	now := time.Now()
+	currentTick := S.TimeToTick(now)
+	targetTick := currentTick + lookAheadTicks
 	m.mu.Unlock()
 
-	// Calculate step duration (16th notes)
-	stepDuration := time.Duration(float64(time.Second) * 60.0 / float64(tempo) / 4.0)
+	// Fill all device queues
+	for _, dev := range m.devices {
+		if dev != nil {
+			dev.FillUntil(targetTick)
+		}
+	}
+}
 
-	ticker := time.NewTicker(stepDuration)
+// queueManagerLoop ensures device queues are filled ahead of playhead
+func (m *Manager) queueManagerLoop() {
+	ticker := time.NewTicker(time.Millisecond * 50) // Every 50ms
+	uiTicker := time.NewTicker(time.Second / 30)    // 30 FPS
 	defer ticker.Stop()
+	defer uiTicker.Stop()
 
 	for {
 		select {
 		case <-m.stopChan:
 			return
+		case <-m.interruptChan:
+			// Queue changed, recalculate immediately
+			m.fillQueues()
 		case <-ticker.C:
+			// Periodic fill
+			m.fillQueues()
+		case <-uiTicker.C:
+			// Update UI state
 			m.mu.Lock()
-			if !S.Playing {
-				m.mu.Unlock()
-				return
-			}
-			step := S.Step
+			S.Tick = S.TimeToTick(time.Now())
 			m.mu.Unlock()
+			m.markLEDsDirty()
+			select {
+			case m.UpdateChan <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
 
-			// 1. Tick all devices → send MIDI events per-device port
-			totalEvents := 0
+// midiOutputLoop reads from device queues and sends MIDI messages
+func (m *Manager) midiOutputLoop() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	for {
+		select {
+		case <-m.stopChan:
+			return
+		default:
+			// Find earliest event across all devices
+			var nextEvent *midi.Event
+			var nextDeviceIdx int = -1
+
+			m.mu.RLock()
 			for i, dev := range m.devices {
 				if dev == nil {
 					continue
@@ -365,70 +516,82 @@ func (m *Manager) tickLoop() {
 				if ts.Muted {
 					continue
 				}
-
-				events := dev.Tick(step)
-				if len(events) == 0 {
-					continue
+				evt := dev.PeekNextEvent()
+				if evt != nil && (nextEvent == nil || evt.Tick < nextEvent.Tick) {
+					nextEvent = evt
+					nextDeviceIdx = i
 				}
+			}
+			m.mu.RUnlock()
 
-				totalEvents += len(events)
+			if nextEvent == nil {
+				// No events, sleep briefly
+				time.Sleep(time.Millisecond)
+				continue
+			}
 
-				// Translate drum slot indices to actual MIDI notes via kit
-				if ts.Type == DeviceTypeDrum {
-					kit := GetKit(ts.Kit)
-					for j := range events {
-						slotIdx := events[j].Note
-						if slotIdx < 16 {
-							events[j].Note = kit.Notes[slotIdx]
-						}
-					}
-				}
+			// Check if we're playing
+			m.mu.RLock()
+			if !S.Playing {
+				m.mu.RUnlock()
+				time.Sleep(time.Millisecond)
+				continue
+			}
+			eventTime := S.TickToTime(nextEvent.Tick)
+			m.mu.RUnlock()
+			waitDuration := eventTime.Sub(time.Now())
 
-				// Determine which port to use
-				portName := ts.PortName
-				if portName == "" {
-					portName = m.defaultPort
-				}
-				sender := m.getSender(portName)
-				if sender == nil {
-					continue
-				}
-
-				// Send events
-				for _, e := range events {
-					// ts.Channel is 1-16 (user-facing), MIDI protocol uses 0-15
-					midiCh := ts.Channel - 1
-					switch e.Type {
-					case midi.NoteOn:
-						sender(gomidi.NoteOn(midiCh, e.Note, e.Velocity))
-						// Schedule note off
-						go func(s func(gomidi.Message) error, ch, note uint8) {
-							time.Sleep(stepDuration * 80 / 100)
-							s(gomidi.NoteOff(ch, note))
-						}(sender, midiCh, e.Note)
-					case midi.NoteOff:
-						sender(gomidi.NoteOff(midiCh, e.Note))
-					}
+			if waitDuration > 0 {
+				timer := time.NewTimer(waitDuration)
+				select {
+				case <-m.stopChan:
+					timer.Stop()
+					return
+				case <-timer.C:
+					// Ready
 				}
 			}
 
-			if totalEvents > 0 {
-				debug.Log("tick", "step=%d events=%d", step, totalEvents)
+			// Pop and send
+			dev := m.devices[nextDeviceIdx]
+			evt := dev.PopNextEvent()
+			if evt == nil {
+				continue
 			}
 
-			// 2. Update LEDs on focused device (diffed)
-			m.markLEDsDirty()
+			m.mu.RLock()
+			ts := S.Tracks[nextDeviceIdx]
+			m.mu.RUnlock()
 
-			// 3. Notify TUI
-			select {
-			case m.UpdateChan <- struct{}{}:
-			default:
+			// Translate drum slot → MIDI note if needed
+			if ts.Type == DeviceTypeDrum {
+				kit := GetKit(ts.Kit)
+				if evt.Note < 16 {
+					evt.Note = kit.Notes[evt.Note]
+				}
 			}
 
-			// 4. Advance step
-			m.mu.Lock()
-			S.Step = (S.Step + 1) % 16
-			m.mu.Unlock()
+			// Send MIDI
+			portName := ts.PortName
+			if portName == "" {
+				portName = m.defaultPort
+			}
+			sender := m.getSender(portName)
+			if sender != nil {
+				midiCh := ts.Channel - 1
+				switch evt.Type {
+				case midi.NoteOn:
+					sender(gomidi.NoteOn(midiCh, evt.Note, evt.Velocity))
+				case midi.NoteOff:
+					sender(gomidi.NoteOff(midiCh, evt.Note))
+				case midi.Trigger:
+					sender(gomidi.NoteOn(midiCh, evt.Note, evt.Velocity))
+					sender(gomidi.NoteOff(midiCh, evt.Note))
+				case midi.PitchBend:
+					sender(gomidi.Pitchbend(midiCh, evt.BendValue))
+				}
+				debug.Log("dispatch", "track=%d port=%s ch=%d tick=%d type=%d note=%d", nextDeviceIdx, portName, midiCh+1, evt.Tick, evt.Type, evt.Note)
+			}
 		}
 	}
 }
@@ -450,7 +613,7 @@ func (m *Manager) SetTempo(bpm int) {
 func (m *Manager) GetState() (step int, playing bool, tempo int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return S.Step, S.Playing, S.Tempo
+	return S.Step(), S.Playing, S.Tempo
 }
 
 // Focus management
@@ -552,20 +715,59 @@ func (m *Manager) handlePreviewEvents() {
 	}
 }
 
-// HandleNote routes a note event to the focused device (for recording)
+// HandleNote handles live MIDI input: echo immediately, then record
 func (m *Manager) HandleNote(note uint8, velocity uint8) {
-	if m.focused != nil {
-		eventType := midi.NoteOn
-		if velocity == 0 {
-			eventType = midi.NoteOff
+	eventType := midi.NoteOn
+	if velocity == 0 {
+		eventType = midi.NoteOff
+	}
+
+	// Calculate tick from wall clock
+	tick := int64(0)
+	if S.Playing {
+		tick = S.TimeToTick(time.Now())
+	}
+
+	// Echo immediately to MIDI out (bypass queue for low latency)
+	// Find which track is focused and use its output settings
+	focusedIdx := m.getFocusedTrackIdx()
+	if focusedIdx >= 0 {
+		ts := S.Tracks[focusedIdx]
+		portName := ts.PortName
+		if portName == "" {
+			portName = m.defaultPort
 		}
+		sender := m.getSender(portName)
+		if sender != nil {
+			midiCh := ts.Channel - 1
+			if eventType == midi.NoteOn {
+				sender(gomidi.NoteOn(midiCh, note, velocity))
+			} else {
+				sender(gomidi.NoteOff(midiCh, note))
+			}
+		}
+	}
+
+	// Send to device for recording (with tick)
+	if m.focused != nil {
 		m.focused.HandleMIDI(midi.Event{
+			Tick:     tick,
 			Type:     eventType,
 			Note:     note,
 			Velocity: velocity,
 		})
 		m.notifyUpdate()
 	}
+}
+
+// getFocusedTrackIdx returns the track index of the focused device (-1 if none)
+func (m *Manager) getFocusedTrackIdx() int {
+	for i, dev := range m.devices {
+		if dev == m.focused {
+			return i
+		}
+	}
+	return -1
 }
 
 // notifyUpdate refreshes LEDs and notifies TUI
