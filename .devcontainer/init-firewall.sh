@@ -80,7 +80,9 @@ for domain in \
     "go.dev" \
     "golang.org" \
     "storage.googleapis.com" \
-    "gitlab.com"; do
+    "gitlab.com" \
+    "api.x.ai" \
+    "x.ai"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
