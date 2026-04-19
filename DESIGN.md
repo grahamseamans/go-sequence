@@ -125,7 +125,75 @@ then
 
 view does a lot, it gets into state and manages it? or is that too cursed. I feel like, making a controller do it is also strange, you know, i really think that the view can just do this
 
-the view is just a funciton that visually shows the human pattern, beause of this, it necissarily udnerstand the human pattern, and therefore is a good play to edit it.
+the view is just a funciton that visually shows the human pattern, beause of this, it necissarily udnerstand the human pattern, and therefore is a good place to edit it.
+
+so there are two types of midi inputs
+
+one is from the lanchpad, one is from the keyboard
+
+my claim i that the launchpad is part of the display, it is therefore a view. it renders, it displays the current thing that we are viewing just as the screen does.
+
+the keyboard on the other hand is pretty fickle. I'm not sure what that is
+
+we need to be able to assign it to a track, so, that would be a part of the model, something that assigns *where* the midi from the keyboard *goes*
+
+then you I geuss have a somehting that interprets this? that's all very strange
+
+ah
+
+the keyboard is also a view
+
+it shows you notes
+
+the keyboard is also a view. then this is just simple?
+
+we still need to define which track is focused for the keyboard, but it's just another view, and edits state the same as the others.
+
+
+
+### stuff:
+
+Overall composing stuff;
+  - Session — clip launcher (queue patterns on each track)
+
+Musical devices (track-assignable):
+  - Drum — 16 lanes × 32 steps + velocity + length + per-pattern kit
+  - Piano — polyphonic notes with start/duration/pitch/velocity
+  - Metropolix — 8 stages with pitch/gate/probability/ratchets/slides/accumulators
+  - Empty — placeholder for unconfigured tracks
+
+System UIs (project-level, focusable):
+  - Project / Save browser — list/load/save/rename/delete project files
+  - Settings — per-track port/channel config, tempo, kit selection
+
+Surfaces (views) — human I/O
+  - Launchpad X — Renders 8×8 RGB LEDs and some extras, captures pad presses
+  - Terminal TUI — Renders text, captures keystrokes
+  - Keyboard (MIDI in) — captures notes from external MIDI keyboard for human pttern update
+
+Background machinery (controller)
+  - Playback — time-driven, reads machine patterns from model, sends MIDI out
+  - Compile — on-demand, generates machine patterns from human patterns + seed
+  - Pattern fresh goroutine — regenerates dual-buffer machine patterns when one gets consumed
+
+Outputs
+  - MIDI out — to synths/hardware, multiple ports/channels
+
+State (model)
+  - Project — name, tempo
+  - tracks: device kind, port name, channel, kit, scheduled pattern number (Playing+Queued)(can be empty) (playing loops if no queued), N human patterns each with 2 machine patterns, timestep of current pattern at pattern start
+  - Transport runtime — playing, t0,
+  - UI state — focus (which device/widget shown), keyboard routing (which track receives MIDI in), browser cursors, edit positions
+
+
+## other details
+
+you figure out where to read from the pattern by:
+t0 - when you started the current pattern = position in current pattern.
+if that's longer than the pattern you're done with it
+ - tell the compiler go routeine to make you a new one and trash what is your current one
+ - make your current one the next available one
+ - this might *not* be t0 for the current pattern, because you might have missed clicks, so you need to calculate where you *should* have started this pattern, if that makes sense. if not ask me and I can explain it more
 
 
 
