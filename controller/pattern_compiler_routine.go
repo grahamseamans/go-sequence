@@ -13,52 +13,33 @@ import (
 	"go-sequence/model/devices"
 )
 
-// Compiler consumes CompileRequest on compileCh and fills the named
-// Machine slot with a fresh CompiledPattern. Runs as its own goroutine so
-// playback never blocks on compile.
+// RunPatternCompiler consumes project.Compile.Channel and fills the named
+// Machine slot with a fresh CompiledPattern. Start it as its own goroutine;
+// blocks until ctx is done (or the channel is closed).
 //
 // Contract: each request targets one (Track, Pattern, Slot) triple and
 // unconditionally overwrites that slot. Callers that need both slots
 // refilled (an edit, initial bootstrap, a wrap-promoted pattern) send two
 // requests. The "fresh rolls every loop" invariant (DESIGN §3.10) falls
 // out of every request getting its own seed.
-type Compiler struct {
-	project   *model.Project
-	compileCh <-chan model.CompileRequest
-
-	// loopCounter mixes into the seed so two compiles in the same nanosecond
-	// for the same (track, pattern, slot) still get distinct seeds.
-	loopCounter atomic.Uint64
-}
-
-// NewCompiler wires the compiler up to the shared compileCh. The sender end
-// of compileCh is held by InputManager (edits, queue) and PlaybackEngine
-// (wrap promotion, Play bootstrap) — both signal "please render this one
-// slot".
-func NewCompiler(project *model.Project, compileCh <-chan model.CompileRequest) *Compiler {
-	return &Compiler{project: project, compileCh: compileCh}
-}
-
-// Run consumes compileCh until ctx is done or the channel is closed.
-// Should be called in its own goroutine.
-func (c *Compiler) Run(ctx context.Context) {
+func RunPatternCompiler(ctx context.Context, project *model.Project) {
+	ch := project.Compile.Channel
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case req, ok := <-c.compileCh:
+		case req, ok := <-ch:
 			if !ok {
 				return
 			}
-			c.compileSlot(req)
+			compileSlot(project, req)
 		}
 	}
 }
 
 // compileSlot renders one Machine slot for one pattern on one track. Holds
-// the track's RLock for the duration — InputManager's writes briefly block
-// compiles, which is fine because writes are sub-millisecond.
-func (c *Compiler) compileSlot(req model.CompileRequest) {
+// the track's RLock for the duration.
+func compileSlot(project *model.Project, req model.CompileRequest) {
 	if req.Track < 0 || req.Track >= 8 {
 		return
 	}
@@ -68,7 +49,7 @@ func (c *Compiler) compileSlot(req model.CompileRequest) {
 	if req.Slot < 0 || req.Slot > 1 {
 		return
 	}
-	track := c.project.Tracks[req.Track]
+	track := project.Tracks[req.Track]
 	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
@@ -77,15 +58,13 @@ func (c *Compiler) compileSlot(req model.CompileRequest) {
 	defer track.RUnlock()
 
 	// Per-slot fresh seed. Mixes wall clock, the (track, pattern, slot)
-	// triple, and a monotonic counter so simultaneous compiles on the same
-	// nanosecond get distinct rolls. Odd-looking mix of XOR and multiply-
-	// by-small-primes is intentional: it keeps the slot/track component in
-	// the low bits where the rng consumes them first.
+	// triple, and the project's monotonic loop counter so simultaneous
+	// compiles get distinct rolls.
 	seed := uint64(time.Now().UnixNano()) ^
 		uint64(req.Track)*31 ^
 		uint64(req.Pattern)*7 ^
 		uint64(req.Slot) ^
-		c.loopCounter.Add(1)
+		project.Compile.LoopCounter.Add(1)
 
 	var cp devices.CompiledPattern
 	var machine *[2]atomic.Pointer[devices.CompiledPattern]

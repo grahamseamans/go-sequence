@@ -18,13 +18,15 @@ const (
 	DeviceMetropolix DeviceKind = "Metropolix"
 )
 
-// Project is the entire persisted state of a go-sequence project, plus its
-// runtime state. Persisted fields carry JSON tags; Playback is runtime only
-// and never written to disk.
+// Project is the entire state of a go-sequence project. Persisted fields
+// carry JSON tags; UI / Playback / Compile are runtime-only (json:"-") and
+// live here per DESIGN §3 — "model owns ALL state".
 type Project struct {
 	Tempo    int           `json:"tempo"`
 	Tracks   [8]*Track     `json:"tracks"`
+	UI       UIState       `json:"-"`
 	Playback PlaybackState `json:"-"`
+	Compile  CompileState  `json:"-"`
 }
 
 // Track is one of the project's eight tracks. Exactly one of Drum/Piano/
@@ -57,10 +59,13 @@ func (t *Track) RLock() { t.mu.RLock() }
 // RUnlock releases the track's read lock.
 func (t *Track) RUnlock() { t.mu.RUnlock() }
 
-// New constructs a fresh Project with default tempo and eight initialized
-// tracks. Tracks start with no device assigned (DeviceNone).
+// New constructs a fresh Project with default tempo, eight initialized
+// tracks (all DeviceNone), and a ready CompileState channel.
 func New() *Project {
-	p := &Project{Tempo: 120}
+	p := &Project{
+		Tempo:   120,
+		Compile: NewCompileState(),
+	}
 	for i := 0; i < 8; i++ {
 		p.Tracks[i] = &Track{
 			Name:    fmt.Sprintf("Track %d", i+1),
