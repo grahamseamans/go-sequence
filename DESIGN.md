@@ -61,15 +61,17 @@ MIDI I/O, Control Surface, and Save/Load all live inside Controller. They're cap
 
 1. **Model is pure data.** No behavior, no I/O. Just structs, JSON tags, and `Validate()` methods that clamp fields to valid ranges.
 
-2. **Devices are pure compilers.** No fields, no state, no side effects. Value-singletons (`var Drum devices.Drum`). Method signature: `Compile(human *model.DrumHuman) *model.MachinePattern`.
+2. **Device types have no fields.** `var Drum devices.Drum` is a value-singleton with only methods. The methods are of two kinds:
+   - **Compile** is pure: `Compile(human *model.DrumHuman) *model.MachinePattern`. Same input → same output. No side effects.
+   - **HandlePad / HandleKey / HandleMIDI** are impure: they mutate the state slice passed to them, may send preview MIDI, may call Compile to refresh the machine pattern.
 
-3. **Input handlers mutate state, then recompile affected patterns.** Step toggle → mutate `Human.Notes` → call `devices.Drum.Compile(&human)` → atomic-swap the new machine pattern. Transport / schedule changes don't need compilation; playback engine reads them directly.
+3. **Input handlers mutate state under a per-track mutex, then recompile.** Step toggle → acquire track mutex → mutate `Human.Notes` → call `devices.Drum.Compile(&human)` → assign new `Events` slice → release mutex. Transport / schedule changes don't need compilation; playback engine reads them directly.
 
 4. **Playback engine is a tape head.** Every tick: read transport → read schedule → read cursor → read current pattern's machine form → dispatch events. All reads.
 
 5. **Input manager routes input.** Receives pad/key/MIDI events. For global commands (play, stop, tempo, save, load), mutates state directly. For device-specific inputs (step toggle, metropolix edit, session pad), routes to the focused device's `HandlePad`/`HandleKey`.
 
-6. **Patterns store both forms.** `DrumPattern` holds a human part (persisted) and a machine part (`json:"-"`, runtime). Atomically swapped as a unit on edit, so tick and view always see a consistent pair.
+6. **Patterns store both forms.** `DrumPattern` holds a human part (persisted) and a machine part (`json:"-"`, runtime). A per-track `sync.RWMutex` guards both. Tick grabs an `Events` slice header under RLock, then walks without the lock — the slice backing array is immutable because input replaces the slice rather than mutating in place.
 
 7. **One code path per concept.** The tick loop runs identical logic every tick regardless of whether anything just changed. Modular-wrap on the cursor handles length changes and pattern swaps for free.
 
@@ -86,20 +88,24 @@ clock advances → PlaybackEngine.tick(globalTick):
     if not state.Transport.Playing: return
     delta = globalTick - lastGlobalTick
     for each track:
+        track.mu.RLock()
         sched   = track.<Kind>.Schedule
-        pattern = track.<Kind>.Patterns[sched.Playing].Load()   // atomic load
-        plen    = patternLength(pattern)
+        events  = track.<Kind>.Patterns[sched.Playing].Machine.Events   // grab slice header
+        plen    = patternLength(track.<Kind>.Patterns[sched.Playing])
+        track.mu.RUnlock()
         cursor.Tick %= plen                                     // handles prior length changes
         newTick = (cursor.Tick + delta) % plen
         wrapped = newTick < cursor.Tick
-        for each event in pattern.Machine.Events:
+        for each event in events:                    // walking without lock; backing array immutable
             if event.Tick in (cursor.Tick, newTick] (split if wrapped):
                 if rollProbability(event.Probability):
                     midi.Send(track.Port, track.Channel, event.Event)
         cursor.Tick = newTick
         if wrapped and sched.Queued != -1:
-            sched.Playing = sched.Queued              // boundary promotion
+            track.mu.Lock()                          // brief write lock for Schedule promotion
+            sched.Playing = sched.Queued
             sched.Queued  = -1
+            track.mu.Unlock()
 ```
 
 No compilation. No regeneration. Pure walk + dispatch.
@@ -109,16 +115,14 @@ No compilation. No regeneration. Pure walk + dispatch.
 ```
 pad press → surface → InputManager.HandlePad(row, col)
   → InputManager calls focused device: devices.Drum.HandlePad(state, project, ports, row, col)
+    → device acquires state.mu.Lock()
     → device mutates state.Patterns[N].Human (e.g., Notes[lane].Steps[step].Active = true)
-    → device recompiles:
-        new := *state.Patterns[N].Load()         // borrow + copy
-        new.Human.Notes[lane].Steps[step].Active = !new.Human.Notes[lane].Steps[step].Active
-        new.Machine = devices.Drum.Compile(&new.Human)
-        state.Patterns[N].Store(&new)            // atomic swap
+    → device recompiles: state.Patterns[N].Machine = devices.Drum.Compile(&state.Patterns[N].Human)
+    → device releases state.mu.Unlock()
     → return
 ```
 
-PlaybackEngine reads the new machine pattern from the next tick onward.
+PlaybackEngine reads the new machine pattern from the next tick onward (RLock, grab events slice header, RUnlock, walk).
 
 ### 4.3 Transport / schedule change (no compile)
 
@@ -156,16 +160,18 @@ save:
 
 load:
     user picks save file
-    Save.HandleKey calls controller.LoadProject(path)
+    Save.HandleKey:
+        state.Transport.Playing = false     // loading stops playback
+        controller.LoadProject(path)
     controller.LoadProject:
         read file, unmarshal into *model.Project
         call project.Validate()
         recompile all patterns (walk, call each device's Compile for each pattern)
         return *model.Project
-    InputManager replaces the shared project state. PlaybackEngine reads the updated state on its next tick. Modular cursor math handles any shape changes (length differences, schedule reshuffles, etc.) — no explicit reset signal needed.
+    InputManager replaces the shared project state. PlaybackEngine is stopped so no tick-time races; next time user hits play, it reads the new state fresh.
 ```
 
-Save/load lives in `controller/project.go`, not in `model/`. Model is pure data.
+Save/load lives in `controller/project.go`, not in `model/`. Model is pure data. **Loading always stops playback** — no mid-play load.
 
 ---
 
@@ -201,16 +207,16 @@ type Track struct {
 }
 
 type Drum struct {
-    Patterns [16]atomic.Pointer[DrumPattern]    // copy-on-write
-    Schedule Schedule                            `json:"schedule"`
-    PlayingPatternIdx int                        `json:"playingPattern"`
-    EditingPatternIdx int                        `json:"editingPattern"`
-    Recording bool                               `json:"-"`
+    mu       sync.RWMutex               `json:"-"`  // protects Patterns + Schedule writes
+    Patterns [16]DrumPattern             `json:"patterns"`
+    Schedule Schedule                    `json:"schedule"`
+    EditingPatternIdx int                `json:"editingPattern"`
+    Recording bool                       `json:"-"`
 }
 
 type DrumPattern struct {
     Human   DrumHuman       `json:"human"`
-    Machine MachinePattern  `json:"-"`       // derived from Human, runtime only
+    Machine MachinePattern  `json:"-"`       // derived from Human, runtime only — replaced (not mutated) under Drum.mu
 }
 
 type DrumHuman struct {
@@ -384,12 +390,11 @@ Goroutines share `*model.Project`:
 | InputManager.Run                | surface pad events                         | patterns (atomic swap via device Compile), spec, Schedule.Queued, transport |
 | InputManager.HandleKey (view)   | everything                                 | same as InputManager.Run                         |
 
-- **Pattern swaps**: `atomic.Pointer[DrumPattern]`. Lock-free reads; atomic swap on write.
-- **Non-pattern state** (schedule, transport, track config): `sync.RWMutex` on Project.
-- **Cursors**: owned by PlaybackEngine. Not shared.
+- **Per-track `sync.RWMutex`** on each device state (Drum, Piano, Metropolix). Guards Patterns (both Human and Machine.Events) and Schedule. Tick takes RLock briefly each iteration to grab a consistent snapshot of events slice header + schedule values; walks events without lock (slice backing array immutable — input replaces, never mutates in place).
+- **Schedule boundary promotion**: PlaybackEngine takes a brief Lock to promote `Queued → Playing`. User queueing takes the same Lock to set `Queued`. Whoever gets the lock first runs; user's queue is always honored on the next boundary after they set it.
+- **Cursors**: owned by PlaybackEngine. Not shared, no lock needed.
 - **Project.Tick, Project.Transport.Playing**: `atomic.Int64` and `atomic.Bool`.
-
-Single-writer principle per field, with one narrow exception: PlaybackEngine writes `Schedule.Playing` and clears `Schedule.Queued` at pattern boundaries (the boundary promotion). `Schedule.Queued` is otherwise written by InputManager (user queueing). Both writes happen under the project RWMutex to coordinate.
+- **Project pointer swap (load)**: only happens when Transport.Playing == false, so no concurrent tick reads. Simple pointer assignment.
 
 ---
 
