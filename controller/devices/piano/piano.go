@@ -7,6 +7,7 @@ import (
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // Package piano is the stateless piano-roll device: a compiler turning a Piano
@@ -70,7 +71,7 @@ const minNoteDurationBeats = 0.25
 // clamped to `length - 1` (matches drum.go's boundary convention); the loop
 // wrap will then send the NoteOff slightly before the NoteOn on the next
 // iteration, which is the intended short-tail behavior.
-func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
+func Compile(spec *devices.Piano, seed uint64) devices.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Piano currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
@@ -81,21 +82,21 @@ func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
 		// Validate() normally guarantees this; be defensive with length 1 to
 		// keep the walker's modular math safe.
-		return model.CompiledPattern{Length: 1}
+		return devices.CompiledPattern{Length: 1}
 	}
 
 	pat := &spec.Patterns[playingIdx]
-	length := int64(pat.Length * float64(model.PPQ))
+	length := int64(pat.Length * float64(devices.PPQ))
 	if length < 1 {
 		length = 1
 	}
 
-	events := make([]model.TimedEvent, 0, len(pat.Notes)*2)
+	events := make([]devices.TimedEvent, 0, len(pat.Notes)*2)
 
 	for i := range pat.Notes {
 		n := &pat.Notes[i]
 
-		onTick := int64(n.Start * float64(model.PPQ))
+		onTick := int64(n.Start * float64(devices.PPQ))
 		if onTick < 0 {
 			onTick = 0
 		}
@@ -103,7 +104,7 @@ func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 			onTick = length - 1
 		}
 
-		offTick := int64((n.Start + n.Duration) * float64(model.PPQ))
+		offTick := int64((n.Start + n.Duration) * float64(devices.PPQ))
 		if offTick <= onTick {
 			offTick = onTick + 1
 		}
@@ -111,7 +112,7 @@ func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 			offTick = length - 1
 		}
 
-		events = append(events, model.TimedEvent{
+		events = append(events, devices.TimedEvent{
 			Tick: onTick,
 			Event: midi.Event{
 				Type:     midi.NoteOn,
@@ -120,7 +121,7 @@ func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 				Channel:  0,
 			},
 		})
-		events = append(events, model.TimedEvent{
+		events = append(events, devices.TimedEvent{
 			Tick: offTick,
 			Event: midi.Event{
 				Type:     midi.NoteOff,
@@ -138,7 +139,7 @@ func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 	})
 
 	// EditCounter is stamped by the Compiler goroutine after Compile returns.
-	return model.CompiledPattern{
+	return devices.CompiledPattern{
 		Events: events,
 		Length: length,
 	}
@@ -346,7 +347,7 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 			state.SelectedNote = -1
 		}
 	case ">", ".":
-		if state.EditingPatternIdx < model.NumPatterns-1 {
+		if state.EditingPatternIdx < devices.NumPatterns-1 {
 			state.EditingPatternIdx++
 			state.SelectedNote = -1
 		}
@@ -401,7 +402,7 @@ func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 		}
 	}
 
-	pat.Notes = append(pat.Notes, model.NoteEvent{
+	pat.Notes = append(pat.Notes, devices.NoteEvent{
 		Start:    start,
 		Duration: dur,
 		Pitch:    ev.Note,
@@ -459,7 +460,7 @@ func pianoEditVert(idx int) int {
 // addPianoNote appends a note to the pattern, clamping to pattern bounds.
 // Drops the note if it can't fit; no silent truncation. (If the user asked
 // for a note off the pattern end, that's a UI bug, not something we hide.)
-func addPianoNote(pat *model.PianoPattern, start, duration float64, pitch, velocity uint8) {
+func addPianoNote(pat *devices.PianoPattern, start, duration float64, pitch, velocity uint8) {
 	if duration < minNoteDurationBeats {
 		duration = minNoteDurationBeats
 	}
@@ -469,13 +470,13 @@ func addPianoNote(pat *model.PianoPattern, start, duration float64, pitch, veloc
 	if start+duration > pat.Length {
 		return
 	}
-	pat.Notes = append(pat.Notes, model.NoteEvent{
+	pat.Notes = append(pat.Notes, devices.NoteEvent{
 		Start: start, Duration: duration, Pitch: pitch, Velocity: velocity,
 	})
 }
 
 // deletePianoNote removes the note at idx. No-op for out-of-range indices.
-func deletePianoNote(pat *model.PianoPattern, idx int) {
+func deletePianoNote(pat *devices.PianoPattern, idx int) {
 	if idx < 0 || idx >= len(pat.Notes) {
 		return
 	}
@@ -483,7 +484,7 @@ func deletePianoNote(pat *model.PianoPattern, idx int) {
 }
 
 // movePianoNoteTime shifts a note's start by deltaBeat, clamped to pattern.
-func movePianoNoteTime(pat *model.PianoPattern, idx int, deltaBeat float64) {
+func movePianoNoteTime(pat *devices.PianoPattern, idx int, deltaBeat float64) {
 	if idx < 0 || idx >= len(pat.Notes) {
 		return
 	}
@@ -498,7 +499,7 @@ func movePianoNoteTime(pat *model.PianoPattern, idx int, deltaBeat float64) {
 }
 
 // movePianoNotePitch shifts a note's pitch by deltaSemitones, clamped to [0,127].
-func movePianoNotePitch(pat *model.PianoPattern, idx int, deltaSemitones int) {
+func movePianoNotePitch(pat *devices.PianoPattern, idx int, deltaSemitones int) {
 	if idx < 0 || idx >= len(pat.Notes) {
 		return
 	}
@@ -515,7 +516,7 @@ func movePianoNotePitch(pat *model.PianoPattern, idx int, deltaSemitones int) {
 
 // setPianoNoteDuration updates a note's duration, clamped to pattern end and
 // the minimum duration floor.
-func setPianoNoteDuration(pat *model.PianoPattern, idx int, duration float64) {
+func setPianoNoteDuration(pat *devices.PianoPattern, idx int, duration float64) {
 	if idx < 0 || idx >= len(pat.Notes) {
 		return
 	}
@@ -530,7 +531,7 @@ func setPianoNoteDuration(pat *model.PianoPattern, idx int, duration float64) {
 }
 
 // setPianoPatternLength updates the pattern length in beats, clamped to [1,64].
-func setPianoPatternLength(pat *model.PianoPattern, beats float64) {
+func setPianoPatternLength(pat *devices.PianoPattern, beats float64) {
 	if beats < 1.0 || beats > 64.0 {
 		return
 	}
@@ -538,14 +539,14 @@ func setPianoPatternLength(pat *model.PianoPattern, beats float64) {
 }
 
 // clearPianoPattern drops every note in the editing pattern.
-func clearPianoPattern(pat *model.PianoPattern) {
+func clearPianoPattern(pat *devices.PianoPattern) {
 	pat.Notes = pat.Notes[:0]
 }
 
 // --- selection / viewport helpers ---
 
 // centerPianoOnSelection scrolls the viewport to show the selected note.
-func centerPianoOnSelection(state *model.Piano) {
+func centerPianoOnSelection(state *devices.Piano) {
 	pat := &state.Patterns[state.EditingPatternIdx]
 	if state.SelectedNote < 0 || state.SelectedNote >= len(pat.Notes) {
 		return
@@ -557,7 +558,7 @@ func centerPianoOnSelection(state *model.Piano) {
 
 // selectPianoNoteByTime moves SelectedNote forward/backward through the
 // time-sorted note list, wrapping at the ends.
-func selectPianoNoteByTime(state *model.Piano, direction int) {
+func selectPianoNoteByTime(state *devices.Piano, direction int) {
 	pat := &state.Patterns[state.EditingPatternIdx]
 	if len(pat.Notes) == 0 {
 		return
@@ -574,7 +575,7 @@ func selectPianoNoteByTime(state *model.Piano, direction int) {
 // selectPianoNoteByPitch walks up/down pitch looking for the nearest-in-time
 // note at each pitch step. Ports the old "jump to closest at next pitch"
 // heuristic from sequencer/pianoroll.go.
-func selectPianoNoteByPitch(state *model.Piano, direction int) {
+func selectPianoNoteByPitch(state *devices.Piano, direction int) {
 	pat := &state.Patterns[state.EditingPatternIdx]
 	if len(pat.Notes) == 0 {
 		return
@@ -622,8 +623,8 @@ func selectPianoNoteByPitch(state *model.Piano, direction int) {
 // sortPianoNotes keeps the pattern's Notes sorted by start time ascending,
 // preserving the user's current selection by matching start+pitch after the
 // sort. Ported from sequencer/pianoroll.go.
-func sortPianoNotes(pat *model.PianoPattern, state *model.Piano) {
-	var selected *model.NoteEvent
+func sortPianoNotes(pat *devices.PianoPattern, state *devices.Piano) {
+	var selected *devices.NoteEvent
 	if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
 		n := pat.Notes[state.SelectedNote]
 		selected = &n

@@ -5,28 +5,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-sequence/midi"
+	"go-sequence/model/devices"
 )
 
 // Runtime state for a Project. Every type here is referenced by Project's
 // `json:"-"` fields; none of it is persisted. Lives in model/ per DESIGN
 // §3.2 — "Model owns ALL state", the persisted/runtime distinction is
 // just a JSON tag.
-
-// CompiledPattern is the output of a device's Compile — a pre-rendered
-// sequence of events for one pattern iteration. Produced by the compile
-// goroutine, consumed by playback.
-type CompiledPattern struct {
-	Events      []TimedEvent
-	Length      int64  // pattern length in ticks
-	EditCounter uint64 // track's editCounter at compile time; used for stale-detection at wrap
-}
-
-// TimedEvent is a MIDI event scheduled at a specific tick within a pattern.
-type TimedEvent struct {
-	Tick  int64
-	Event midi.Event
-}
 
 // Cursor is a per-track playback position within its currently-playing pattern.
 type Cursor struct {
@@ -64,8 +49,8 @@ type PlaybackState struct {
 
 	// Double-buffered per-track events. Playback reads current; compile
 	// writes next. At wrap boundary, current ← next (atomic swap).
-	CurrentEvents [8]atomic.Pointer[CompiledPattern]
-	NextEvents    [8]atomic.Pointer[CompiledPattern]
+	CurrentEvents [8]atomic.Pointer[devices.CompiledPattern]
+	NextEvents    [8]atomic.Pointer[devices.CompiledPattern]
 
 	// EditCounters[i] is bumped by controller mutators on any spec
 	// mutation. Compile stamps the value onto each CompiledPattern; wrap

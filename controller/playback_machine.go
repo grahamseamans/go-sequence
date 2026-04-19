@@ -9,12 +9,13 @@ import (
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // MaxDeltaTicks clamps a tick delta when the wall clock jumps (laptop sleep,
 // host hiccup, etc.). Past this many ticks we treat it as a 1-tick advance
 // instead of trying to replay thousands of events at once.
-const MaxDeltaTicks = int64(model.PPQ) // 1 quarter note
+const MaxDeltaTicks = int64(devices.PPQ) // 1 quarter note
 
 // tickSleep is the granularity at which the tick goroutine wakes up to check
 // whether a tick boundary has elapsed. It is small enough to keep jitter under
@@ -31,8 +32,8 @@ type PlaybackEngine struct {
 
 	// Double-buffered per-track events. Playback reads current; compile
 	// writes next. At wrap boundary, current <- next (atomic swap).
-	currentEvents [8]atomic.Pointer[model.CompiledPattern]
-	nextEvents    [8]atomic.Pointer[model.CompiledPattern]
+	currentEvents [8]atomic.Pointer[devices.CompiledPattern]
+	nextEvents    [8]atomic.Pointer[devices.CompiledPattern]
 
 	// Per-track edit version. InputManager bumps on mutation. Compiler
 	// stamps into each CompiledPattern it produces. Used by the wrap
@@ -120,7 +121,7 @@ func tickInterval(bpm int64) time.Duration {
 		return 0
 	}
 	// 60 seconds per minute * 1e9 ns/s / (bpm * PPQ) ticks per minute
-	return time.Duration(60e9 / (bpm * int64(model.PPQ)))
+	return time.Duration(60e9 / (bpm * int64(devices.PPQ)))
 }
 
 // processTick walks each track's current events and dispatches anything in
@@ -195,7 +196,7 @@ func (pe *PlaybackEngine) processTick(globalTick int64) {
 // dispatch sends a single timed event out through the configured MIDI output,
 // respecting the track's mute flag. Errors from out.Send are ignored for now
 // (mock outputs and OS send errors are both non-fatal in the tick path).
-func (pe *PlaybackEngine) dispatch(trackIdx int, ev model.TimedEvent) {
+func (pe *PlaybackEngine) dispatch(trackIdx int, ev devices.TimedEvent) {
 	track := pe.project.Tracks[trackIdx]
 	if track == nil {
 		return
@@ -312,7 +313,7 @@ func (pe *PlaybackEngine) ResetCursors() {
 // NextEvents exposes the next_events array to the compiler goroutine, which
 // is the sole writer. Playback reads it (and clears it on promotion) in the
 // wrap handler.
-func (pe *PlaybackEngine) NextEvents() *[8]atomic.Pointer[model.CompiledPattern] {
+func (pe *PlaybackEngine) NextEvents() *[8]atomic.Pointer[devices.CompiledPattern] {
 	return &pe.nextEvents
 }
 

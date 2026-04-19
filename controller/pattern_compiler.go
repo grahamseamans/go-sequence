@@ -10,6 +10,7 @@ import (
 	"go-sequence/controller/devices/piano"
 	"go-sequence/debug"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // Compiler consumes trackIdx on compileCh, renders the track's pattern via
@@ -22,7 +23,7 @@ import (
 // into the double-buffer's "next" slot.
 type Compiler struct {
 	project      *model.Project
-	nextEvents   *[8]atomic.Pointer[model.CompiledPattern]
+	nextEvents   *[8]atomic.Pointer[devices.CompiledPattern]
 	editCounters *[8]atomic.Uint64
 	compileCh    <-chan int
 
@@ -91,14 +92,14 @@ func (c *Compiler) compileTrack(trackIdx int) {
 	seed := uint64(time.Now().UnixNano()) ^ uint64(trackIdx) ^ c.loopCounter.Add(1)
 
 	track.RLock()
-	var cp model.CompiledPattern
+	var cp devices.CompiledPattern
 	switch track.Type {
 	case model.DeviceDrum:
 		if track.Drum == nil {
 			track.RUnlock()
 			return
 		}
-		kit := model.GetKit(track.Kit)
+		kit := devices.GetKit(track.Kit)
 		cp = drum.Compile(track.Drum, kit, seed)
 	case model.DevicePiano:
 		if track.Piano == nil {

@@ -4,6 +4,7 @@ import (
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // Package settings is the project-level track/MIDI configuration editor. It
@@ -120,21 +121,21 @@ func setDeviceType(track *model.Track, kind model.DeviceKind) {
 		track.Piano = nil
 		track.Metropolix = nil
 		if track.Drum == nil {
-			track.Drum = &model.Drum{}
+			track.Drum = &devices.Drum{}
 		}
 		track.Drum.Validate()
 	case model.DevicePiano:
 		track.Drum = nil
 		track.Metropolix = nil
 		if track.Piano == nil {
-			track.Piano = &model.Piano{}
+			track.Piano = &devices.Piano{}
 		}
 		track.Piano.Validate()
 	case model.DeviceMetropolix:
 		track.Drum = nil
 		track.Piano = nil
 		if track.Metropolix == nil {
-			track.Metropolix = &model.Metropolix{}
+			track.Metropolix = &devices.Metropolix{}
 		}
 		track.Metropolix.Validate()
 	}
@@ -168,10 +169,10 @@ func prevDeviceKind(kind model.DeviceKind) model.DeviceKind {
 	return deviceKindCycle[(i-1+len(deviceKindCycle))%len(deviceKindCycle)]
 }
 
-// nextKit returns the next kit name in model.KitNames(), wrapping around.
+// nextKit returns the next kit name in devices.KitNames(), wrapping around.
 // An empty or unknown current kit maps to the first kit in the list.
 func nextKit(current string) string {
-	names := model.KitNames()
+	names := devices.KitNames()
 	if len(names) == 0 {
 		return current
 	}

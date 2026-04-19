@@ -7,6 +7,7 @@ import (
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // Package drum is the stateless drum device: a compiler turning a Drum spec
@@ -26,10 +27,10 @@ const noteDurationTicks int64 = 60
 // same output.
 //
 // Signature diverges from DESIGN.md §5.4: Compile takes an explicit
-// `kit model.Kit` because the kit lives on the Track, not on the Drum spec,
+// `kit devices.Kit` because the kit lives on the Track, not on the Drum spec,
 // and Compile is a pure function of its inputs. The caller (Compiler
 // goroutine) resolves kit from the track before invoking.
-func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern {
+func Compile(spec *devices.Drum, kit devices.Kit, seed uint64) devices.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Drum currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
@@ -40,7 +41,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
 		// Validate() normally guarantees this, but be defensive: empty
 		// pattern, length 1 (divide-by-zero guard in the walker).
-		return model.CompiledPattern{Length: 1}
+		return devices.CompiledPattern{Length: 1}
 	}
 
 	pat := &spec.Patterns[playingIdx]
@@ -49,7 +50,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 		length = 1
 	}
 
-	ticksPerStep := int64(model.PPQ / 4)
+	ticksPerStep := int64(devices.PPQ / 4)
 	// stepsInPattern is how many 16th-note steps fit within pat.Length.
 	// Steps beyond this index exist in the spec's fixed [32]DrumStep array
 	// but are not played — the pattern's length is the gate.
@@ -58,7 +59,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 		stepsInPattern = 32
 	}
 
-	events := make([]model.TimedEvent, 0, stepsInPattern*4)
+	events := make([]devices.TimedEvent, 0, stepsInPattern*4)
 
 	for laneIdx := 0; laneIdx < 16; laneIdx++ {
 		lane := &pat.Notes[laneIdx]
@@ -91,7 +92,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 				offTick = length - 1
 			}
 
-			events = append(events, model.TimedEvent{
+			events = append(events, devices.TimedEvent{
 				Tick: onTick,
 				Event: midi.Event{
 					Type:     midi.NoteOn,
@@ -99,7 +100,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 					Velocity: velocity,
 				},
 			})
-			events = append(events, model.TimedEvent{
+			events = append(events, devices.TimedEvent{
 				Tick: offTick,
 				Event: midi.Event{
 					Type:     midi.NoteOff,
@@ -117,7 +118,7 @@ func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern
 	})
 
 	// EditCounter is stamped by the Compiler goroutine after Compile returns.
-	return model.CompiledPattern{
+	return devices.CompiledPattern{
 		Events: events,
 		Length: length,
 	}
@@ -164,7 +165,7 @@ func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, 
 
 		// Preview: send the lane's drum note directly. No queueing, no
 		// compile — the hit is audible immediately.
-		kit := model.GetKit(track.Kit)
+		kit := devices.GetKit(track.Kit)
 		note := kit.Notes[laneIdx]
 		_ = out.Send(track.PortName, track.Channel, midi.Event{
 			Type:     midi.NoteOn,
@@ -234,7 +235,7 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 			state.EditingPatternIdx--
 		}
 	case ">", ".":
-		if state.EditingPatternIdx < model.NumPatterns-1 {
+		if state.EditingPatternIdx < devices.NumPatterns-1 {
 			state.EditingPatternIdx++
 		}
 	case "r", "R":
@@ -259,7 +260,7 @@ func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	}
 
 	// Reverse-lookup MIDI note → lane index via the kit.
-	kit := model.GetKit(track.Kit)
+	kit := devices.GetKit(track.Kit)
 	laneIdx := -1
 	for i, n := range kit.Notes {
 		if n == ev.Note {
@@ -289,7 +290,7 @@ func RenderLEDs(track *model.Track, project *model.Project) []surface.LED { retu
 // --- spec mutators (package-private; callers hold track.mu) ---
 
 // toggleStep flips a step's Active bit, resetting velocity when turning on.
-func toggleStep(pat *model.DrumPattern, lane, step int) {
+func toggleStep(pat *devices.DrumPattern, lane, step int) {
 	if lane < 0 || lane >= 16 || step < 0 || step >= 32 {
 		return
 	}
@@ -301,7 +302,7 @@ func toggleStep(pat *model.DrumPattern, lane, step int) {
 }
 
 // setStep forces a step Active with the given velocity.
-func setStep(pat *model.DrumPattern, lane, step int, velocity uint8) {
+func setStep(pat *devices.DrumPattern, lane, step int, velocity uint8) {
 	if lane < 0 || lane >= 16 || step < 0 || step >= 32 {
 		return
 	}
@@ -311,20 +312,20 @@ func setStep(pat *model.DrumPattern, lane, step int, velocity uint8) {
 }
 
 // clearLane zeroes every step in one lane.
-func clearLane(pat *model.DrumPattern, lane int) {
+func clearLane(pat *devices.DrumPattern, lane int) {
 	if lane < 0 || lane >= 16 {
 		return
 	}
 	for i := range pat.Notes[lane].Steps {
-		pat.Notes[lane].Steps[i] = model.DrumStep{}
+		pat.Notes[lane].Steps[i] = devices.DrumStep{}
 	}
 }
 
 // clearPattern zeroes every step in every lane.
-func clearPattern(pat *model.DrumPattern) {
+func clearPattern(pat *devices.DrumPattern) {
 	for l := range pat.Notes {
 		for s := range pat.Notes[l].Steps {
-			pat.Notes[l].Steps[s] = model.DrumStep{}
+			pat.Notes[l].Steps[s] = devices.DrumStep{}
 		}
 	}
 }

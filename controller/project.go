@@ -34,6 +34,7 @@ import (
 
 	"go-sequence/controller/devices/save"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // savesDir returns the absolute path to the fixed saves directory. The
@@ -131,8 +132,8 @@ func LoadProject(path string) (*model.Project, error) {
 func NewProject() *model.Project {
 	p := model.New()
 	p.Tracks[0].Type = model.DeviceDrum
-	p.Tracks[0].Kit = model.DefaultKit
-	p.Tracks[0].Drum = &model.Drum{}
+	p.Tracks[0].Kit = devices.DefaultKit
+	p.Tracks[0].Drum = &devices.Drum{}
 	p.Validate()
 	return p
 }
