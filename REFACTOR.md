@@ -38,9 +38,9 @@ Three top-level chunks. MIDI I/O and Control Surface live *inside* Controller be
 
 ## Principles
 
-- **One State struct.** Save = `json.Marshal(state)`. No save vs runtime split.
+- **One source of truth for state, no parallel save format.** Model is whatever lives in `model/` — can be one struct or many. Save = serialize the model package. The constraint is "no second copy of the data living elsewhere," not "literally one struct."
+- **Devices are pure Controllers. They have no state.** They take input, read from Model, mutate Model, emit MIDI events. The `DrumState` struct lives in `model/`; the `DrumDevice` (in `controller/devices/`) is just behavior that operates on it. They share a name by naming convention, not by ownership.
 - **Test at module boundaries**, not internals. Each chunk gets `*_test.go` exercising the public API. Mock implementations (MockSurface, fake MIDI port) let the engine run end-to-end with no hardware.
-- **Devices are stateless tick functions** that operate on slices of Model. They don't own state; they read/write Model slices via the Device interface.
 - **Data flow**: Inputs (clock, keyboard via View, pads via Surface, MIDI in) → Controller → Model mutations → Views (screen, LEDs, MIDI out).
 
 ## Audit punch list
