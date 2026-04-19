@@ -1,20 +1,20 @@
-package devices
+package piano
 
 import (
 	"sort"
 
+	"go-sequence/controller/devices/rng"
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
 )
 
-// Piano is the stateless piano-roll device: a compiler turning a Piano spec
-// into TimedEvents, plus input handlers that mutate the spec. All behavior
-// lives here; Track.Piano in the model holds only spec data.
+// Package piano is the stateless piano-roll device: a compiler turning a Piano
+// spec into TimedEvents, plus input handlers that mutate the spec. All
+// behavior lives here; Track.Piano in the model holds only spec data.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; Piano methods
+// Callers (Compiler, InputManager) hold the Track's mutex; functions here
 // never touch it themselves.
-type Piano struct{}
 
 // --- view/edit constants ported from sequencer/pianoroll.go ---
 //
@@ -70,12 +70,12 @@ const minNoteDurationBeats = 0.25
 // clamped to `length - 1` (matches drum.go's boundary convention); the loop
 // wrap will then send the NoteOff slightly before the NoteOn on the next
 // iteration, which is the intended short-tail behavior.
-func (Piano) Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
+func Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Piano currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
 	// TODO(probability): use r when per-note probability lands.
-	_ = NewRng(seed)
+	_ = rng.NewRng(seed)
 
 	playingIdx := spec.Schedule.Playing
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
@@ -158,7 +158,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 // — currently the source has no such split, so all taps behave as edit. Add
 // a play-mode toggle + direct out.Send preview when the model gets a
 // Piano.Mode field.
-func (Piano) HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
+func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
@@ -215,7 +215,7 @@ func (Piano) HandlePad(track *model.Track, project *model.Project, out midi.ToEx
 // Keybindings ported verbatim from sequencer/pianoroll.go.HandleKey. If a
 // binding looks surprising, that's the old behavior — don't invent new ones
 // here.
-func (Piano) HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
+func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Piano == nil {
 		return
 	}
@@ -369,7 +369,7 @@ func (Piano) HandleKey(track *model.Track, project *model.Project, out midi.ToEx
 // TODO(piano-record-tick): when InputManager gets access to the live
 // playback tick (step 4+), restore the quantize-to-beat behavior and the
 // NoteOn→NoteOff pairing for accurate durations.
-func (Piano) HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
+func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	if track == nil || track.Piano == nil {
 		return
 	}
@@ -412,11 +412,11 @@ func (Piano) HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) 
 
 // Render is a stub; step 5 will port the TUI view from sequencer/pianoroll.go.
 // TODO(step5): port rendering from sequencer/pianoroll.go when view/ rewires.
-func (Piano) Render(track *model.Track, project *model.Project) string { return "" }
+func Render(track *model.Track, project *model.Project) string { return "" }
 
 // RenderLEDs is a stub; step 5 will port the LED layout from sequencer/pianoroll.go.
 // TODO(step5): port rendering from sequencer/pianoroll.go when view/ rewires.
-func (Piano) RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }
+func RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }
 
 // --- spec accessors (safe index into the lookup tables) ---
 

@@ -1,4 +1,4 @@
-package devices
+package session
 
 import (
 	"go-sequence/controller/surface"
@@ -6,15 +6,14 @@ import (
 	"go-sequence/model"
 )
 
-// Session is the project-level "clip launcher" device: an 8x8 grid where
-// columns are tracks and rows are patterns. Tapping a cell queues that
+// Package session is the project-level "clip launcher" device: an 8x8 grid
+// where columns are tracks and rows are patterns. Tapping a cell queues that
 // pattern on that track. Session owns no state of its own — it reads and
 // writes project.Tracks[*].<Device>.Schedule.
 //
 // Signature diverges from a per-track device: there is no `state` parameter
-// and no Compile method. Session does not emit MIDI events; it only mutates
+// and no Compile function. Session does not emit MIDI events; it only mutates
 // per-track Schedule.Queued.
-type Session struct{}
 
 // HandlePad queues a pattern on a track.
 //
@@ -27,7 +26,7 @@ type Session struct{}
 // `row = track, col = pattern`, so that's what we use here: the row picks
 // the track and the col picks the pattern. Revisit in step 5 when view/
 // rewires and we can confirm the visual mapping against the Launchpad.
-func (Session) HandlePad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
+func HandlePad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
@@ -67,14 +66,14 @@ func (Session) HandlePad(project *model.Project, out midi.ToExternal, row, col i
 // lives on InputManager, not per-device, so cursor-style UI state is
 // dropped here. If we want a keyboard launcher later, it should come back
 // via InputManager's focus/selection, not on a hidden Session field.
-func (Session) HandleKey(project *model.Project, out midi.ToExternal, key string) {
+func HandleKey(project *model.Project, out midi.ToExternal, key string) {
 	// Intentional no-op until InputManager gains session-cursor state.
 }
 
 // Render is a stub; step 5 will port the TUI view from sequencer/session.go.
 // TODO(step5): port rendering from sequencer/session.go when view/ rewires.
-func (Session) Render(project *model.Project) string { return "" }
+func Render(project *model.Project) string { return "" }
 
 // RenderLEDs is a stub; step 5 will port the LED layout from sequencer/session.go.
 // TODO(step5): port rendering from sequencer/session.go when view/ rewires.
-func (Session) RenderLEDs(project *model.Project) []surface.LED { return nil }
+func RenderLEDs(project *model.Project) []surface.LED { return nil }

@@ -1,4 +1,4 @@
-package devices
+package settings
 
 import (
 	"go-sequence/controller/surface"
@@ -6,8 +6,8 @@ import (
 	"go-sequence/model"
 )
 
-// Settings is the project-level track/MIDI configuration editor. It mutates
-// per-track fields: Type, PortName, Channel, Kit, Muted, Solo.
+// Package settings is the project-level track/MIDI configuration editor. It
+// mutates per-track fields: Type, PortName, Channel, Kit, Muted, Solo.
 //
 // Settings owns no state of its own — all edits land on project.Tracks[i].
 //
@@ -23,7 +23,6 @@ import (
 //
 // We may unify this across all project-level devices later with an explicit
 // Focus parameter everywhere; for now only Settings needs it.
-type Settings struct{}
 
 // HandlePad handles pad input on the settings view.
 //
@@ -32,7 +31,7 @@ type Settings struct{}
 // InputManager's job. Other pads are no-ops for now.
 // TODO(step5): revisit once the view layer drives Settings UI to decide
 // which edits should have a pad shortcut.
-func (Settings) HandlePad(project *model.Project, out midi.ToExternal, focusedTrack, row, col int, down bool) {
+func HandlePad(project *model.Project, out midi.ToExternal, focusedTrack, row, col int, down bool) {
 	// Intentional no-op. Track focus is driven by InputManager keybinds, not
 	// by pad presses inside Settings.
 }
@@ -43,11 +42,11 @@ func (Settings) HandlePad(project *model.Project, out midi.ToExternal, focusedTr
 // chrome that doesn't survive the move to devices/). The keybindings below
 // cycle through the discrete options directly:
 //
-//   t / T        cycle device type (Drum → Piano → Metropolix → None → ...)
-//   [ / ]        decrement / increment MIDI channel (0..15)
-//   k            cycle drum kit (only when track.Type == DeviceDrum)
-//   m            toggle mute
-//   s            toggle solo
+//	t / T        cycle device type (Drum → Piano → Metropolix → None → ...)
+//	[ / ]        decrement / increment MIDI channel (0..15)
+//	k            cycle drum kit (only when track.Type == DeviceDrum)
+//	m            toggle mute
+//	s            toggle solo
 //
 // Port name selection is intentionally dropped for now: the old UI cached
 // the list of available MIDI output ports on the device, which doesn't
@@ -55,7 +54,7 @@ func (Settings) HandlePad(project *model.Project, out midi.ToExternal, focusedTr
 // through InputManager (which holds the live midi.Ports reference and can
 // enumerate outputs) in step 4/5.
 // TODO(step4): plumb port-name selection through InputManager.
-func (Settings) HandleKey(project *model.Project, out midi.ToExternal, focusedTrack int, key string) {
+func HandleKey(project *model.Project, out midi.ToExternal, focusedTrack int, key string) {
 	if project == nil {
 		return
 	}
@@ -93,11 +92,11 @@ func (Settings) HandleKey(project *model.Project, out midi.ToExternal, focusedTr
 
 // Render is a stub; step 5 will port the TUI view from sequencer/settings.go.
 // TODO(step5): port rendering from sequencer/settings.go when view/ rewires.
-func (Settings) Render(project *model.Project) string { return "" }
+func Render(project *model.Project) string { return "" }
 
 // RenderLEDs is a stub; step 5 will port the LED layout from sequencer/settings.go.
 // TODO(step5): port rendering from sequencer/settings.go when view/ rewires.
-func (Settings) RenderLEDs(project *model.Project) []surface.LED { return nil }
+func RenderLEDs(project *model.Project) []surface.LED { return nil }
 
 // --- helpers (package-private; caller holds track.mu) ---
 

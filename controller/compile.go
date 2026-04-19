@@ -5,7 +5,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-sequence/controller/devices"
+	"go-sequence/controller/devices/drum"
+	"go-sequence/controller/devices/metropolix"
+	"go-sequence/controller/devices/piano"
 	"go-sequence/debug"
 	"go-sequence/model"
 )
@@ -97,19 +99,19 @@ func (c *Compiler) compileTrack(trackIdx int) {
 			return
 		}
 		kit := model.GetKit(track.Kit)
-		cp = devices.Drum{}.Compile(track.Drum, kit, seed)
+		cp = drum.Compile(track.Drum, kit, seed)
 	case model.DevicePiano:
 		if track.Piano == nil {
 			track.RUnlock()
 			return
 		}
-		cp = devices.Piano{}.Compile(track.Piano, seed)
+		cp = piano.Compile(track.Piano, seed)
 	case model.DeviceMetropolix:
 		if track.Metropolix == nil {
 			track.RUnlock()
 			return
 		}
-		cp = devices.Metropolix{}.Compile(track.Metropolix, seed)
+		cp = metropolix.Compile(track.Metropolix, seed)
 	default:
 		track.RUnlock()
 		return

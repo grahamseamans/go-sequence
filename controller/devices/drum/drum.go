@@ -1,20 +1,20 @@
-package devices
+package drum
 
 import (
 	"sort"
 
+	"go-sequence/controller/devices/rng"
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
 )
 
-// Drum is the stateless drum device: a compiler turning a Drum spec into
-// TimedEvents, plus input handlers that mutate the spec. All behavior lives
-// here; Track.Drum in the model holds only spec data.
+// Package drum is the stateless drum device: a compiler turning a Drum spec
+// into TimedEvents, plus input handlers that mutate the spec. All behavior
+// lives here; Track.Drum in the model holds only spec data.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; Drum methods
+// Callers (Compiler, InputManager) hold the Track's mutex; functions here
 // never touch it themselves.
-type Drum struct{}
 
 // noteDurationTicks is how long each drum NoteOn is held before the matching
 // NoteOff. Drum hits are short, so a fixed short duration is fine.
@@ -29,12 +29,12 @@ const noteDurationTicks int64 = 60
 // `kit model.Kit` because the kit lives on the Track, not on the Drum spec,
 // and Compile is a pure function of its inputs. The caller (Compiler
 // goroutine) resolves kit from the track before invoking.
-func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern {
+func Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Drum currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
 	// TODO(probability): use r when per-step probability lands.
-	_ = NewRng(seed)
+	_ = rng.NewRng(seed)
 
 	playingIdx := spec.Schedule.Playing
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
@@ -130,7 +130,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) model.Compiled
 // Kit for preview MIDI sends. Drum methods access `track.Drum` internally.
 // Releases (down == false) are no-ops for now — the drum device is
 // press-only today.
-func (Drum) HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
+func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
@@ -199,7 +199,7 @@ func (Drum) HandlePad(track *model.Track, project *model.Project, out midi.ToExt
 // HandleKey handles a keyboard event on the drum view.
 //
 // Signature diverges from DESIGN.md §5.4: takes `*model.Track` (see HandlePad).
-func (Drum) HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
+func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Drum == nil {
 		return
 	}
@@ -246,7 +246,7 @@ func (Drum) HandleKey(track *model.Track, project *model.Project, out midi.ToExt
 // recording is armed.
 //
 // Signature diverges from DESIGN.md §5.4: takes `*model.Track` (see HandlePad).
-func (Drum) HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
+func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	if track == nil || track.Drum == nil {
 		return
 	}
@@ -280,11 +280,11 @@ func (Drum) HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 
 // Render is a stub; step 5 will port the TUI view from sequencer/drum.go.
 // TODO(step5): port rendering from sequencer/drum.go when view/ rewires.
-func (Drum) Render(track *model.Track, project *model.Project) string { return "" }
+func Render(track *model.Track, project *model.Project) string { return "" }
 
 // RenderLEDs is a stub; step 5 will port the LED layout from sequencer/drum.go.
 // TODO(step5): port rendering from sequencer/drum.go when view/ rewires.
-func (Drum) RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }
+func RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }
 
 // --- spec mutators (package-private; callers hold track.mu) ---
 

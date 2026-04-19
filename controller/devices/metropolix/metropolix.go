@@ -1,25 +1,25 @@
-package devices
+package metropolix
 
 import (
 	"sort"
 
+	"go-sequence/controller/devices/rng"
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
 )
 
-// Metropolix is the stateless Metropolix-style melodic sequencer device:
-// a compiler turning a Metropolix spec into TimedEvents, plus input handlers
-// that mutate the spec. The spec in the model holds only human-editable data;
-// all behavior (stage walk, accumulator evolution, probability rolls, slide
-// pitch bends) lives here.
+// Package metropolix is the stateless Metropolix-style melodic sequencer
+// device: a compiler turning a Metropolix spec into TimedEvents, plus input
+// handlers that mutate the spec. The spec in the model holds only
+// human-editable data; all behavior (stage walk, accumulator evolution,
+// probability rolls, slide pitch bends) lives here.
 //
 // Compile is the ONE place probability rolls happen — per DESIGN §7. Same
 // (spec, seed) → same output. Fresh seed every loop → fresh rolls every loop.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; Metropolix methods
+// Callers (Compiler, InputManager) hold the Track's mutex; functions here
 // never touch it themselves.
-type Metropolix struct{}
 
 // --- Pages (Launchpad parameter pages, selected via scene-button column) ---
 
@@ -90,8 +90,8 @@ var scaleIntervals = map[model.ScaleType][]int{
 // Probability is rolled ONCE per stage. If it fails, the stage emits nothing
 // (no note, no ratchets). Ratchets within a gated stage all play — they share
 // the stage's single probability outcome.
-func (Metropolix) Compile(spec *model.Metropolix, seed uint64) model.CompiledPattern {
-	rng := NewRng(seed)
+func Compile(spec *model.Metropolix, seed uint64) model.CompiledPattern {
+	prng := rng.NewRng(seed)
 
 	playingIdx := spec.Schedule.Playing
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
@@ -121,7 +121,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) model.CompiledPat
 	// walk is the ordered list of stage indices this pattern iteration visits.
 	// For Forward / Reverse / Random it has patLen entries; for Pendulum it
 	// has 2*patLen-2 entries (or 1 when patLen == 1).
-	walk := stageWalk(pat.Mode, patLen, rng)
+	walk := stageWalk(pat.Mode, patLen, prng)
 
 	// Pre-compute each stage's pitch *after* accumulator evolution applies at
 	// the end of the visit. We need the "current visit's" pitch for the NoteOn
@@ -144,7 +144,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) model.CompiledPat
 
 		// Probability roll: single roll per stage visit. Controls whether any
 		// notes fire this visit — ratchets share the same outcome.
-		fires := stage.Gate && rng.Probability(uint8(stage.Probability))
+		fires := stage.Gate && prng.Probability(uint8(stage.Probability))
 
 		if fires && stage.Ratchets > 0 {
 			ratchets := stage.Ratchets
@@ -282,8 +282,8 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) model.CompiledPat
 }
 
 // stageWalk returns the sequence of stage indices visited in one loop of
-// the pattern, per mode. Random mode consumes rng for each step.
-func stageWalk(mode model.PlaybackMode, patLen int, rng *Rng) []int {
+// the pattern, per mode. Random mode consumes prng for each step.
+func stageWalk(mode model.PlaybackMode, patLen int, prng *rng.Rng) []int {
 	switch mode {
 	case model.ModeReverse:
 		walk := make([]int, patLen)
@@ -309,7 +309,7 @@ func stageWalk(mode model.PlaybackMode, patLen int, rng *Rng) []int {
 	case model.ModeRandom:
 		walk := make([]int, patLen)
 		for i := 0; i < patLen; i++ {
-			walk[i] = rng.IntN(patLen)
+			walk[i] = prng.IntN(patLen)
 		}
 		return walk
 
@@ -394,7 +394,7 @@ func applyAccumulator(stage *model.MetropolixStage, stageIdx int, accum, accumCo
 
 // HandlePad dispatches a pad press/release to the page-specific handler.
 // Releases (down == false) are no-ops.
-func (Metropolix) HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
+func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
@@ -532,7 +532,7 @@ func handleAccumulatorPad(spec *model.Metropolix, pat *model.MetropolixPattern, 
 
 // HandleKey mutates the editing stage / pattern via keyboard shortcuts.
 // Mirrors the shortcuts of the old sequencer metropolix view.
-func (Metropolix) HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
+func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Metropolix == nil {
 		return
 	}
@@ -639,15 +639,15 @@ func (Metropolix) HandleKey(track *model.Track, project *model.Project, out midi
 // HandleMIDI currently ignores incoming MIDI. The old sequencer left a stub
 // comment ("could record incoming notes to stages") — intentional drop until
 // we design stage-recording semantics. Do NOT silently record here.
-func (Metropolix) HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
+func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	// No-op: Metropolix does not record from MIDI input today.
 	// TODO(stage-recording): define note → stage mapping when we add this.
 }
 
 // Render is a stub; step 5 will port the TUI view from sequencer/metropolix.go.
 // TODO(step5): port rendering from sequencer/metropolix.go when view/ rewires.
-func (Metropolix) Render(track *model.Track, project *model.Project) string { return "" }
+func Render(track *model.Track, project *model.Project) string { return "" }
 
 // RenderLEDs is a stub; step 5 will port the LED layout from sequencer/metropolix.go.
 // TODO(step5): port rendering from sequencer/metropolix.go when view/ rewires.
-func (Metropolix) RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }
+func RenderLEDs(track *model.Track, project *model.Project) []surface.LED { return nil }

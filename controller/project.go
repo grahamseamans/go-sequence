@@ -18,9 +18,9 @@
 // the fresh specs.
 //
 // controllerSaveOps wraps the package-level helpers and implements
-// devices.SaveOps so that controller/devices can stay ignorant of controller/
-// (no import cycle). NewControllerSaveOps is the factory the wiring code
-// (main.go, eventually InputManager construction) calls.
+// save.SaveOps so that controller/devices/save can stay ignorant of
+// controller/ (no import cycle). NewControllerSaveOps is the factory the
+// wiring code (main.go, eventually InputManager construction) calls.
 package controller
 
 import (
@@ -32,7 +32,7 @@ import (
 	"sort"
 	"strings"
 
-	"go-sequence/controller/devices"
+	"go-sequence/controller/devices/save"
 	"go-sequence/model"
 )
 
@@ -209,14 +209,14 @@ func RenameSave(oldName, newName string) error {
 	)
 }
 
-// controllerSaveOps is the devices.SaveOps implementation that forwards to
-// the package-level Save/Load/List/Delete/Rename functions. Injected into
-// InputManager and then into devices.Save so controller/devices/ doesn't
+// controllerSaveOps is the save.SaveOps implementation that forwards to the
+// package-level Save/Load/List/Delete/Rename functions. Injected into
+// InputManager and then into save.Save so controller/devices/save doesn't
 // need to import controller/ (which would create a cycle).
 type controllerSaveOps struct{}
 
 // NewControllerSaveOps returns the concrete SaveOps impl for injection.
-func NewControllerSaveOps() devices.SaveOps {
+func NewControllerSaveOps() save.SaveOps {
 	return controllerSaveOps{}
 }
 

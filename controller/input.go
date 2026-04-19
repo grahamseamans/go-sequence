@@ -35,7 +35,13 @@ import (
 	"context"
 	"sync/atomic"
 
-	"go-sequence/controller/devices"
+	"go-sequence/controller/devices/drum"
+	"go-sequence/controller/devices/empty"
+	"go-sequence/controller/devices/metropolix"
+	"go-sequence/controller/devices/piano"
+	"go-sequence/controller/devices/save"
+	"go-sequence/controller/devices/session"
+	"go-sequence/controller/devices/settings"
 	"go-sequence/controller/surface"
 	"go-sequence/debug"
 	"go-sequence/midi"
@@ -77,11 +83,12 @@ type InputManager struct {
 	focused          FocusTarget
 	lastFocusedTrack int // remembered when navigating to Settings/Session/Save
 
-	// Device singletons. Drum/Piano/Metropolix/Session/Settings/Empty are
-	// empty structs (value semantics). Save is a stateful singleton that
-	// carries the save-browser cursor and text-edit buffer.
-	save    *devices.Save
-	saveOps devices.SaveOps
+	// Save is the only stateful device singleton — it carries the save-
+	// browser cursor and text-edit buffer. All other per-domain packages
+	// (drum, piano, metropolix, session, settings, empty) expose free
+	// functions and need no singleton.
+	save    *save.Save
+	saveOps save.SaveOps
 
 	// Per-track MIDI subscriber cancels, so Close() can unsubscribe cleanly.
 	midiCancels [8]context.CancelFunc
@@ -96,7 +103,7 @@ func NewInputManager(
 	in midi.FromExternal,
 	surf surface.Surface,
 	compileCh chan<- int,
-	saveOps devices.SaveOps,
+	saveOps save.SaveOps,
 ) *InputManager {
 	return &InputManager{
 		project:      project,
@@ -107,7 +114,7 @@ func NewInputManager(
 		compileCh:    compileCh,
 		editCounters: pe.EditCounters(),
 		focused:      FocusTarget{Kind: FocusTrack, Track: 0},
-		save:         &devices.Save{},
+		save:         &save.Save{},
 		saveOps:      saveOps,
 	}
 }
@@ -184,14 +191,14 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 		track.Lock()
 		switch track.Type {
 		case model.DeviceDrum:
-			devices.Drum{}.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			drum.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
 		case model.DevicePiano:
-			devices.Piano{}.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			piano.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
 		case model.DeviceMetropolix:
-			devices.Metropolix{}.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			metropolix.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
 		default:
 			// DeviceNone — no-op device still gets the event for symmetry.
-			devices.Empty{}.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
+			empty.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
 		}
 		track.Unlock()
 		if ev.Down {
@@ -208,7 +215,7 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 		if tgt != nil {
 			tgt.Lock()
 		}
-		devices.Session{}.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
+		session.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
 		if tgt != nil {
 			tgt.Unlock()
 		}
@@ -224,7 +231,7 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 		if tgt != nil {
 			tgt.Lock()
 		}
-		devices.Settings{}.HandlePad(im.project, im.out, idx, ev.Row, ev.Col, ev.Down)
+		settings.HandlePad(im.project, im.out, idx, ev.Row, ev.Col, ev.Down)
 		if tgt != nil {
 			tgt.Unlock()
 		}
@@ -253,11 +260,11 @@ func (im *InputManager) handleMidi(trackIdx int, ev midi.Event) {
 	track.Lock()
 	switch track.Type {
 	case model.DeviceDrum:
-		devices.Drum{}.HandleMIDI(track, im.out, ev)
+		drum.HandleMIDI(track, im.out, ev)
 	case model.DevicePiano:
-		devices.Piano{}.HandleMIDI(track, im.out, ev)
+		piano.HandleMIDI(track, im.out, ev)
 	case model.DeviceMetropolix:
-		devices.Metropolix{}.HandleMIDI(track, im.out, ev)
+		metropolix.HandleMIDI(track, im.out, ev)
 	}
 	track.Unlock()
 	im.markTrackDirty(trackIdx)
@@ -317,13 +324,13 @@ func (im *InputManager) HandleKey(key string) {
 		track.Lock()
 		switch track.Type {
 		case model.DeviceDrum:
-			devices.Drum{}.HandleKey(track, im.project, im.out, key)
+			drum.HandleKey(track, im.project, im.out, key)
 		case model.DevicePiano:
-			devices.Piano{}.HandleKey(track, im.project, im.out, key)
+			piano.HandleKey(track, im.project, im.out, key)
 		case model.DeviceMetropolix:
-			devices.Metropolix{}.HandleKey(track, im.project, im.out, key)
+			metropolix.HandleKey(track, im.project, im.out, key)
 		default:
-			devices.Empty{}.HandleKey(im.project, im.out, key)
+			empty.HandleKey(im.project, im.out, key)
 		}
 		track.Unlock()
 		im.markTrackDirty(idx)
@@ -331,7 +338,7 @@ func (im *InputManager) HandleKey(key string) {
 	case FocusSession:
 		// Session.HandleKey is currently a no-op, but dispatch for symmetry.
 		// No dirty-mark: no state change possible.
-		devices.Session{}.HandleKey(im.project, im.out, key)
+		session.HandleKey(im.project, im.out, key)
 
 	case FocusSettings:
 		idx := im.lastFocusedTrack
@@ -339,7 +346,7 @@ func (im *InputManager) HandleKey(key string) {
 		if tgt != nil {
 			tgt.Lock()
 		}
-		devices.Settings{}.HandleKey(im.project, im.out, idx, key)
+		settings.HandleKey(im.project, im.out, idx, key)
 		if tgt != nil {
 			tgt.Unlock()
 		}
@@ -351,7 +358,7 @@ func (im *InputManager) HandleKey(key string) {
 		// commit-name path is a cheap false positive that just triggers
 		// one extra round of recompiles — still correct).
 		//
-		// TODO(step4c-followup): expose devices.Save.IsEditing() so we can
+		// TODO(step4c-followup): expose save.Save.IsEditing() so we can
 		// distinguish commit-name from load and skip the unnecessary
 		// Pause + 8 recompiles in the commit-name case.
 		wasLoad := key == "enter" || key == "return"

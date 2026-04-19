@@ -1,4 +1,4 @@
-package devices
+package rng
 
 // Rng is an xorshift64 PRNG. Deterministic given a seed. Fast, decent
 // statistical quality, much better than math/rand's default for our purposes.
