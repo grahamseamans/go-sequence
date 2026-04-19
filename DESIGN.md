@@ -8,10 +8,10 @@ This document describes the target architecture. Source of truth for design deci
 
 ## 1. The whole system, in five lines
 
-- **Model** — state. Human patterns (what you edit), machine patterns (what plays), schedule (which patterns in what order), transport (playing/stopped/tempo).
-- **Controller: devices** — pure compilers. Human pattern → machine pattern.
-- **Controller: input manager** — receives events (pad/key/MIDI in). Mutates state. Calls the device compiler when a human pattern changed.
-- **Controller: playback engine** — reads state, dispatches MIDI.
+- **Model** — state. Human patterns (what you edit), schedule (which patterns in what order), transport (playing/stopped/tempo). No compiled/derived data.
+- **Controller: devices** — pure compilers. `Compile(spec, rngSeed)` → list of `(tick, midi event)` pairs. Different seed → different rolls.
+- **Controller: playback engine** — walks pre-compiled events with a cursor. Double-buffered per track: `current_events` is playing now, `next_events` is the next iteration pre-rendered. On wrap: atomic-swap buffers, signal compile goroutine to produce a new `next_events`. Tick path is pure walk + dispatch.
+- **Controller: input manager** — receives events (pad/key/MIDI in). Mutates state. On pattern edit, signals compile goroutine to re-render that track. On queue, signals compile goroutine to render the queued pattern.
 - **View** — renders state.
 
 Everything else is implementation detail.
@@ -22,124 +22,143 @@ Everything else is implementation detail.
 
 ```
                         ┌────────────────┐
-                        │     model/     │   data only
-                        │ Project, Drum, │   human patterns
-                        │ Piano, ...     │   machine patterns (runtime)
+                        │     model/     │   data only; human patterns,
+                        │ Project, Drum, │   schedule, transport
+                        │ Piano, ...     │
                         └────────────────┘
                           ▲             ▲
                   reads   │             │ reads + mutates
                           │             │
                 ┌─────────┴───┐  ┌──────┴────────────────────────┐
                 │    view/    │  │         controller/           │
-                │  TUI now,   │  │  playback.go (playback engine)│
-                │  Wails next │  │  input.go    (input manager)  │
-                │             │  │  project.go  (save/load)      │
+                │  TUI now,   │  │  playback.go — tick loop,     │
+                │  Wails next │  │    walks current_events,      │
+                │             │  │    double-buffered per track  │
+                │             │  │  input.go    — event router,  │
+                │             │  │    signals compile on edit    │
+                │             │  │  compile.go  — goroutine,     │
+                │             │  │    consumes channel, renders  │
+                │             │  │    events into next_events    │
+                │             │  │  project.go  — save/load      │
                 │             │  │  ┌──────────────────────────┐ │
-                │             │  │  │ devices/  Drum, Piano,   │ │
-                │             │  │  │           Metropolix,    │ │
-                │             │  │  │           Session, ...   │ │
+                │             │  │  │ devices/ pure compilers  │ │
                 │             │  │  └──────────────────────────┘ │
                 │             │  │  ┌──────────────────────────┐ │
-                │             │  │  │ surface/  Launchpad,     │ │
-                │             │  │  │           Mock           │ │
-                │             │  │  └──────────────────────────┘ │
-                │             │  │  ┌──────────────────────────┐ │
-                │             │  │  │ midi/     OS port I/O    │ │
+                │             │  │  │ surface/ Launchpad, Mock │ │
                 │             │  │  └──────────────────────────┘ │
                 └─────────────┘  └───────────────────────────────┘
                        │                       │
-                       │ keypress              │ pad events ↔ LED
-                       ▼                       ▼ MIDI in ↔ MIDI out
+                       │                       │
+                       ▼                       ▼
                     keyboard               Launchpad, MIDI hardware
+                                           (via midi/ package at root)
 ```
 
-MIDI I/O, Control Surface, and Save/Load all live inside Controller. They're capabilities the Controller uses to do its job, not peer chunks.
+`midi/` lives at the repo root (not inside `controller/`) because it holds both data types (Event, EventType) and I/O primitives (Ports, Send, Subscribe) that are cross-cutting — Model imports `midi` for type definitions, Controller imports `midi` for types + I/O.
 
 ---
 
 ## 3. Principles
 
-1. **Model is pure data.** No behavior, no I/O. Just structs, JSON tags, and `Validate()` methods that clamp fields to valid ranges.
+1. **Model is pure data, no derived/runtime data.** All persisted state lives in `model/`. Save = serialize the package. Load = deserialize back. Compiled events, current cursor positions, RNG seeds — none of that lives here. They're runtime state owned by the playback engine.
 
-2. **Device types have no fields and no lock awareness.** `var Drum devices.Drum` is a value-singleton with only methods. The methods are of two kinds:
-   - **Compile** is pure: `Compile(human *model.DrumHuman) *model.MachinePattern`. Same input → same output. No side effects.
-   - **HandlePad / HandleKey / HandleMIDI** are impure: they mutate the state slice passed to them, may send preview MIDI, may call Compile. They never acquire locks themselves.
+2. **Devices are pure compilers.** Empty-struct singletons (`var Drum devices.Drum`). Signature: `Compile(spec *model.Drum, seed uint64) CompiledPattern`. Same spec + same seed → same events. Different seeds → different rolls. Probability, ratchet randomness, any roll-based decisions happen inside Compile.
 
-3. **InputManager owns all writer-side locking.** It's the sole writer in the system, so it owns the lock. Before calling any device handler, it acquires the appropriate per-track mutex; after the handler returns, it releases. Devices stay focused on *what* to do; InputManager controls *when it's safe to write*.
+3. **Playback engine is a pure walker.** Every tick: read current events, dispatch any whose tick is in (prevCursor, newCursor]. No compile logic in the tick path. At wrap boundary, atomic-swap current ← next, send a compile signal.
 
-4. **Playback engine is a tape head.** Every tick: read transport → read schedule → read cursor → read current pattern's machine form → dispatch events. All reads.
+4. **Input manager owns writes + triggers compiles.** Sole writer to Model. On pattern edit: mutate spec, then signal "recompile this track" to the compile goroutine. On schedule change (queue a pattern): mutate schedule, signal compile with the queued pattern's spec.
 
-5. **Input manager routes input.** Receives pad/key/MIDI events. For global commands (play, stop, tempo, save, load), mutates state directly. For device-specific inputs (step toggle, metropolix edit, session pad), routes to the focused device's `HandlePad`/`HandleKey`.
+5. **Compile goroutine is the only producer of CompiledPatterns.** Receives `trackIdx` on a channel, calls the appropriate device's `Compile`, atomic-stores the result into `next_events[trackIdx]`. Runs on its own goroutine; never blocks playback.
 
-6. **Patterns store both forms.** `DrumPattern` holds a human part (persisted) and a machine part (`json:"-"`, runtime). A per-track `sync.RWMutex` guards both. Tick grabs an `Events` slice header under RLock, then walks without the lock — the slice backing array is immutable because input replaces the slice rather than mutating in place.
+6. **Fresh rolls every loop.** When playback wraps and swaps in `next_events`, it sends a compile signal so the next `next_events` gets rendered with a FRESH seed. Live-feel: every loop sounds different. Deterministic if you log the seeds.
 
-7. **One code path per concept.** The tick loop runs identical logic every tick regardless of whether anything just changed. Modular-wrap on the cursor handles length changes and pattern swaps for free.
+7. **One code path per concept.** Tick loop is always the same logic. Wrap handling is uniform. Modular cursor math handles length changes and pattern swaps for free.
 
-8. **Naming: package path conveys role, no role suffixes.** `model.Drum` is the data, `controller/devices.Drum` is the behavior. Same domain word in both packages.
+8. **Naming: package path conveys role, no role suffixes.** `model.Drum` is data, `controller/devices.Drum` is behavior. Same domain word in both. Go-idiomatic anti-stutter.
 
 ---
 
 ## 4. Data flows
 
-### 4.1 Tick (the tape head)
+### 4.1 Tick (the walker)
+
+Pure walk, no compile work. On wrap, atomic-swap and signal compile goroutine.
 
 ```
 clock advances → PlaybackEngine.tick(globalTick):
-    if not state.Transport.Playing: return
+    if not pe.playing.Load(): return
     delta = globalTick - lastGlobalTick
+    // Clamp delta to one pattern length max. If the clock jumped (laptop
+    // slept, host hiccup, pause→play), we don't try to replay multiple
+    // loops' worth of missed events — just resume from current position.
+    if delta > MAX_DELTA_TICKS: delta = 1
     for each track:
-        track.mu.RLock()
-        sched   = track.<Kind>.Schedule
-        events  = track.<Kind>.Patterns[sched.Playing].Machine.Events   // grab slice header
-        plen    = patternLength(track.<Kind>.Patterns[sched.Playing])
-        track.mu.RUnlock()
-        cursor.Tick %= plen                                     // handles prior length changes
+        buf   = atomic.Load(current_events[track])   // []TimedEvent + length
+        plen  = buf.Length
+        cursor.Tick %= plen                          // handles prior length changes
         newTick = (cursor.Tick + delta) % plen
         wrapped = newTick < cursor.Tick
-        for each event in events:                    // walking without lock; backing array immutable
+        for each event in buf.Events:
             if event.Tick in (cursor.Tick, newTick] (split if wrapped):
-                if rollProbability(event.Probability):
-                    midi.Send(track.Port, track.Channel, event.Event)
+                midi.Send(track.Port, track.Channel, event.Event)
         cursor.Tick = newTick
-        if wrapped and sched.Queued != -1:
-            track.mu.Lock()                          // brief write lock for Schedule promotion
-            sched.Playing = sched.Queued
-            sched.Queued  = -1
-            track.mu.Unlock()
+        if wrapped:
+            handleWrap(track)
+
+handleWrap(track):
+    // Schedule advance (if queued pattern pending)
+    if sched.Queued != -1:
+        sched.Playing = sched.Queued
+        sched.Queued  = -1
+    // Atomic swap: the already-compiled next becomes current
+    next_buf := atomic.Load(next_events[track])
+    current_stale := (buf.EditCounter < editCounters[track].Load())
+    if next_buf != nil:
+        atomic.Store(current_events[track], next_buf)
+        atomic.Store(next_events[track], nil)
+    elif current_stale:
+        // Edits have happened since current_events was compiled AND next
+        // isn't ready. Don't play stale events — sync-compile right here.
+        // Brief stall, but bounded (<1ms typical); worst case user hears
+        // one tick of silence. Better than wrong notes.
+        log.Warn("sync compile at wrap, track", track)
+        atomic.Store(current_events[track], syncCompile(track))
+    else:
+        // next not ready but current is still valid (no edits since render).
+        // Just reuse current for another loop. Live-feel lost for one loop.
+        log.Debug("next not ready, reusing current, track", track)
+    // Request a fresh next iteration
+    compileCh <- track
 ```
 
-No compilation. No regeneration. Pure walk + dispatch.
-
-### 4.2 Pattern edit (compile-triggering input)
+### 4.2 Pattern edit (mutation + recompile)
 
 ```
 pad press → surface → InputManager.HandlePad(row, col)
-  → InputManager acquires state.mu.Lock()           // writer owns the lock
+  → InputManager acquires state.mu.Lock()
   → InputManager calls focused device: devices.Drum.HandlePad(state, project, out, row, col)
-    → device mutates state.Patterns[N].Human (e.g., Notes[lane].Steps[step].Active = true)
-    → device recompiles: state.Patterns[N].Machine = devices.Drum.Compile(&state.Patterns[N].Human)
-    → return                                        // device never touches the lock
+    → device mutates state.Patterns[N] (e.g., toggle a step)
+    → return
   → InputManager releases state.mu.Unlock()
+  → InputManager: compileCh <- trackIdx   // signal: this track's next_events is stale
 ```
 
-PlaybackEngine reads the new machine pattern from the next tick onward (RLock, grab events slice header, RUnlock, walk).
+The compile goroutine picks up, renders the edited spec with a fresh seed, and atomic-stores into `next_events[trackIdx]`. On the next wrap boundary, that becomes `current_events` and the edit takes effect.
 
-Note: preview-only handler calls (no state mutation) still get wrapped in Lock/Unlock for uniformity. Cost is sub-microsecond. If this ever shows up as a hot path, devices can split into separate `HandlePadMutating` / `HandlePadPreview` methods so InputManager only locks the mutating path.
+User-perceived behavior: "edit now, hear change next bar."
 
-### 4.3 Transport / schedule change (no compile)
+### 4.3 Queue (pattern switching)
 
 ```
-key press → InputManager.HandleKey(key)
-  → InputManager recognizes "space" as play/pause → toggles state.Transport.Playing
-  → return
-
 pad press in Session view → Session.HandlePad(state, project, out, row, col)
   → device mutates state.Tracks[row].Drum.Schedule.Queued = col
-  → LED render next frame: pattern-col pad flashes (reads Schedule.Queued)
   → return
+  → InputManager: compileCh <- row     // signal: recompile this track's next_events,
+                                        //   but using the QUEUED pattern's spec this time
+  → LED render next frame: pattern-col pad flashes (reads Schedule.Queued)
 ```
 
-No compile called. PlaybackEngine reads `Schedule.Queued` and promotes it to `Schedule.Playing` at the next pattern boundary — which also causes the flashing pad to go solid.
+The compile goroutine reads the track's `Schedule.Queued`, compiles the queued pattern's spec (not the currently playing one), and stores the events as `next_events`. At wrap, playback swaps in and schedules promote — the queued pattern starts playing with its pre-rendered events. Zero compile work at the transition.
 
 ### 4.4 Preview MIDI (no state, no compile)
 
@@ -150,7 +169,7 @@ pad press in Drum view, not recording → Drum.HandlePad(state, project, out, ro
   → return
 ```
 
-Direct send. Input handlers take `midi.ToExternal` as a parameter — they can send MIDI out but cannot subscribe. No state change, no intent machinery.
+Direct send. No compile, no state change.
 
 ### 4.5 Save / Load
 
@@ -168,105 +187,95 @@ load:
     controller.LoadProject:
         read file, unmarshal into *model.Project
         call project.Validate()
-        recompile all patterns (walk, call each device's Compile for each pattern)
         return *model.Project
-    InputManager replaces the shared project state. PlaybackEngine is stopped so no tick-time races; next time user hits play, it reads the new state fresh.
+    InputManager replaces the shared project state.
+    InputManager signals compile for each track (current_events / next_events
+      are stale since they reference the old project's specs).
+    When user hits play: playback reads fresh events.
 ```
 
-Save/load lives in `controller/project.go`, not in `model/`. Model is pure data. **Loading always stops playback** — no mid-play load.
+No machine patterns to persist or recompute on load. State is just the spec.
 
 ### 4.6 Clock
 
-Internal wall-clock timer drives playback. PPQ = 960 (compile-time constant; ~0.5ms resolution at 120 BPM).
+Internal wall-clock timer drives playback. PPQ = 960 (compile-time constant).
+Transport state (`playing`, `t0`, `tick`) lives in PlaybackEngine, not Model.
 
 ```
 tick interval (ns) = 60e9 / (Tempo * PPQ)
 
-on play:
-    state.Transport.Playing = true
-    state.Transport.T0      = time.Now()
-    state.Tick              = 0          // reset on each play (simpler than resume)
+on play:                            // InputManager calls pe.Play()
+    pe.playing.Store(true)
+    pe.t0 = time.Now()
+    pe.tick.Store(0)
 
-on pause:
-    state.Transport.Playing = false
-    (Tick is preserved; next play starts fresh at 0)
+on pause:                           // InputManager calls pe.Pause()
+    pe.playing.Store(false)
 
 on tempo change during play:
-    re-anchor: T0 = time.Now() - (Tick * newInterval)
-    subsequent ticks use the new interval; no tick jump
+    pe.t0 = time.Now() - (pe.tick.Load() * newInterval)
+    // Tempo change does NOT require recompile — events use ticks, not wall time.
 
-tick loop (goroutine):
-    for state.Transport.Playing:
-        sleep until next expected tick boundary
-        globalTick = int64((time.Now() - T0) / interval)
-        if globalTick > state.Tick:
-            PlaybackEngine.tick(globalTick)          // handles delta ≥ 1
-            state.Tick = globalTick
+tick loop goroutine:
+    for pe.playing.Load():
+        sleep until next tick boundary
+        globalTick = int64((time.Now() - pe.t0) / interval)
+        if globalTick > pe.tick.Load():
+            pe.tick(globalTick)
+            pe.tick.Store(globalTick)
 ```
 
-Back-pressure: if dispatch lags, one tick loop call can process delta > 1 ticks in its for-each-event scan — no tick drop. If this ever becomes unsustainable (CPU saturation), we'd add a rate limit; not a concern for 8 tracks × ~16 events per pattern at typical tempos.
-
-Future: MIDI clock slave mode. Same tick loop, external `globalTick` source instead of internal timer. No other changes.
+InputManager controls playback via public methods on PlaybackEngine:
+`pe.Play()`, `pe.Pause()`, `pe.SetTempo(bpm)`. No shared runtime state in Model.
 
 ### 4.7 MIDI input routing
 
-All routing logic lives in `controller/midi/`. InputManager is a thin consumer:
+All routing logic in `midi/`:
 
 ```
-// midi package exposes via FromExternal interface:
-in.Subscribe(portName, channel uint8) → <-chan Event
-    // returns events matching both filters
-    // buffer = 64; overflow drops oldest (real-time MIDI: stale > lost)
-    // multiple subscribers for the same (port, channel) each get a copy
+midi.Subscribe(portName, channel uint8) → <-chan Event
+    // filtered; buffer=64; overflow drops oldest
+    // multiple subscribers for same (port,channel) each get a copy
 
 InputManager on startup:
     for each track:
         go func(trackIdx int):
-            ch, _ := im.in.Subscribe(track.PortName, track.Channel)
+            ch := midi.Subscribe(track.PortName, track.Channel)
             for event := range ch:
-                im.state.mu.Lock()
+                track := project.Tracks[trackIdx]
+                track.mu.Lock()                   // per-track, consistent with edit/queue flows
                 devices.<Kind>.HandleMIDI(trackState, im.out, event)
-                im.state.mu.Unlock()
+                track.mu.Unlock()
+                editCounters[trackIdx].Add(1)     // signal "spec changed"
+                compileCh <- trackIdx             // trigger recompile
 ```
-
-InputManager has no awareness of port/channel matching, buffering strategy, or flood handling — the midi package owns all of that. If the same (port, channel) is used by multiple tracks, each track's subscription gets the event independently.
 
 ### 4.8 Focus
 
-```
+```go
 type FocusTarget struct {
-    Kind  FocusKind   // Track, Settings, Save, Session
-    Track int         // valid when Kind == Track
+    Kind  FocusKind
+    Track int
 }
 ```
 
-Mutated only by InputManager itself (single-goroutine write), so no lock needed. Read by View under its own RLock-style snapshot (atomic read of the pointer would also work — FocusTarget is small enough to copy by value).
-
-Changes triggered by:
-- Number keys 1-8 → `Kind=Track, Track=idx`
-- `,` → `Kind=Settings`
-- `s` → `Kind=Save`
-- tab through session → `Kind=Session`
-
-Session pad taps do NOT change focus by default — they just mutate `Schedule.Queued` on the tapped track. Hardware clip-launcher convention.
+Mutated only by InputManager's own goroutine. Read by View via a small value-copy accessor. Triggers: number keys → track focus, `,` → Settings, `s` → Save, tab → Session. Session pad taps don't change focus.
 
 ### 4.9 View rendering
 
-View runs its own goroutine at ~60Hz:
+Runs ~60Hz goroutine:
 
 ```
 for each frame (~16ms):
     focused := InputManager.Focused()            // small value copy
-    track   := state.Tracks[focused.Track]
     track.<Kind>.mu.RLock()
     tuiStr  := devices.<Kind>.Render(deviceState, project)
     leds    := devices.<Kind>.RenderLEDs(deviceState, project)
     track.<Kind>.mu.RUnlock()
-    render tuiStr to terminal
-    surface.SetLEDs(leds)
+    render tuiStr; surface.SetLEDs(leds)
 ```
 
-RLock contention: tick goroutine takes RLock briefly each tick (microseconds); view takes RLock at 60Hz. Readers don't block each other. Writer (input edits) briefly blocks both, which is fine — edits are bursty and sub-ms.
+View only reads Model (the spec). It doesn't need to know about `current_events` / `next_events` — those are playback-internal.
 
 ---
 
@@ -274,78 +283,89 @@ RLock contention: tick goroutine takes RLock briefly each tick (microseconds); v
 
 ### 5.1 model/
 
-Pure data. No I/O. No behavior beyond `Validate()`.
+Pure data. No I/O. No behavior beyond `Validate()`. No derived fields (no compiled events, no cached cursors, no RNG state).
 
 ```go
 package model
 
 type Project struct {
-    Tempo      int                  `json:"tempo"`
-    Tracks     [8]*Track            `json:"tracks"`
-    Transport  Transport            `json:"-"`  // runtime
-    Tick       int64                `json:"-"`  // runtime
+    Tempo  int        `json:"tempo"`
+    Tracks [8]*Track  `json:"tracks"`
 }
 
-type Transport struct {
-    Playing bool
-    T0      time.Time
-}
+// No Transport, no Tick, no Playing. Those are runtime state owned by
+// PlaybackEngine, not Model. Model is PURE persisted data.
 
 type Track struct {
-    Name     string                 `json:"name"`
-    Channel  uint8                  `json:"channel"`
-    PortName string                 `json:"portName,omitempty"`
-    Type     DeviceKind             `json:"type"`
-    Drum       *Drum                `json:"drum,omitempty"`
-    Piano      *Piano               `json:"piano,omitempty"`
-    Metropolix *Metropolix          `json:"metropolix,omitempty"`
+    Name       string        `json:"name"`
+    Channel    uint8         `json:"channel"`
+    PortName   string        `json:"portName,omitempty"`
+    Type       DeviceKind    `json:"type"`
+    mu         sync.RWMutex  `json:"-"`
+    Drum       *Drum         `json:"drum,omitempty"`
+    Piano      *Piano        `json:"piano,omitempty"`
+    Metropolix *Metropolix   `json:"metropolix,omitempty"`
 }
 
 type Drum struct {
-    mu       sync.RWMutex               `json:"-"`  // protects Patterns + Schedule writes
-    Patterns [16]DrumPattern             `json:"patterns"`
-    Schedule Schedule                    `json:"schedule"`
-    EditingPatternIdx int                `json:"editingPattern"`
-    Recording bool                       `json:"-"`
+    Patterns [16]DrumPattern  `json:"patterns"`   // specs only
+    Schedule Schedule          `json:"schedule"`
+    EditingPatternIdx int      `json:"editingPattern"`
+    Recording bool             `json:"-"`
 }
 
 type DrumPattern struct {
-    Human   DrumHuman       `json:"human"`
-    Machine MachinePattern  `json:"-"`       // derived from Human, runtime only — replaced (not mutated) under Drum.mu
+    // human-editable spec only. No compiled events.
+    Notes  [16]NoteLane    `json:"notes"`
+    Length int             `json:"length"`   // in ticks
 }
 
-type DrumHuman struct {
-    Notes [16]NoteLane
-}
-
-type MachinePattern struct {
-    Events []TimedEvent
-}
+// Piano, Metropolix similar — spec only. No machine/events field.
 
 type Schedule struct {
-    Playing int `json:"playing"`  // currently playing pattern (0-15)
-    Queued  int `json:"queued"`   // -1 if none; pattern to promote at next boundary
-}
-// Future: a Chain type (named, reusable sequence of pattern indices) that
-// Schedule.Playing/Queued can also reference via a small kind enum. Deferred to v2.
-
-type TimedEvent struct {
-    Tick        int64
-    Event       midi.Event
-    StageID     int     // for grouping (e.g., Metropolix ratchets share a probability gate)
-    Probability uint8   // 0-100, dispatch rolls
+    Playing int `json:"playing"`
+    Queued  int `json:"queued"`
 }
 
 func (p *Project) Validate()  // clamps all fields recursively
 ```
 
-Piano and Metropolix follow the same shape (Human + Machine per pattern, per-track RWMutex on the device state).
+Note: `Track.mu` protects writes to the track's spec fields (Drum/Piano/Metropolix) so the compile goroutine reading and InputManager writing don't race.
 
-### 5.2 view/
+### 5.2 midi/ (at repo root)
 
-Reads from Model (via Manager accessors), sends keyboard events to Manager. Bubbletea TUI now, Wails later. Doesn't import `model` directly.
+Data types + OS I/O. Cross-cutting — imported by Model (for types), Controller (for types + I/O).
 
-### 5.3 controller/
+```go
+package midi
+
+type EventType uint8
+const (NoteOn EventType = iota; NoteOff; CC; PitchBend; /* ... */)
+
+type Event struct {
+    Type     EventType
+    Note     uint8
+    Velocity uint8
+    Channel  uint8
+    Value    int16   // for PitchBend, CC
+}
+
+type ToExternal interface { Send(portName string, channel uint8, ev Event) error }
+type FromExternal interface { Subscribe(portName string, channel uint8) (<-chan Event, error) }
+
+type Ports struct { ... }  // implements both interfaces
+func NewPorts() (*Ports, error)
+func (p *Ports) Send(...) error
+func (p *Ports) Subscribe(...) (<-chan Event, error)
+func (p *Ports) List() []PortInfo
+func (p *Ports) Close() error
+```
+
+### 5.3 view/
+
+Bubbletea TUI now, Wails later. Reads Model (via Manager accessor). Sends key events to InputManager.
+
+### 5.4 controller/
 
 #### controller/playback.go
 
@@ -353,21 +373,76 @@ Reads from Model (via Manager accessors), sends keyboard events to Manager. Bubb
 package controller
 
 type PlaybackEngine struct {
-    project *model.Project
-    cursors [8]Cursor
-    out     midi.ToExternal       // only sends; cannot subscribe
+    project        *model.Project
+    out            midi.ToExternal
+    cursors        [8]Cursor
+    currentEvents  [8]atomic.Pointer[CompiledPattern]  // what's playing now
+    nextEvents     [8]atomic.Pointer[CompiledPattern]  // pre-rendered next iteration
+    compileCh      chan<- int                          // signals compile goroutine
+    lastGlobalTick int64
+
+    // Transport / clock state — owned here, NOT in Model. Model is pure
+    // persisted data; runtime clock state lives with the engine that walks it.
+    playing        atomic.Bool
+    t0             time.Time    // wall-clock anchor when play started
+    tick           atomic.Int64 // current global tick; written by tickLoop, read by everyone else
+
+    // Edit tracking: incremented when InputManager signals a recompile for
+    // a track. Compiler records the edit counter it rendered against; at
+    // wrap, if current_events has a lower counter than the latest edit, the
+    // events are stale and we do a sync recompile rather than reuse them.
+    editCounters [8]atomic.Uint64
 }
 
-type Cursor struct {
-    Tick int64   // playback position within the currently-playing pattern
+type Cursor struct { Tick int64 }
+
+type CompiledPattern struct {
+    Events      []TimedEvent
+    Length      int64   // pattern length in ticks
+    EditCounter uint64  // Compiler records track's editCounters[i] at compile time.
+                        // Used at wrap to detect stale: if current_events.EditCounter
+                        // < editCounters[i].Load() and next isn't ready, sync-compile
+                        // instead of reusing current.
 }
 
-func NewPlaybackEngine(project *model.Project, out midi.ToExternal) *PlaybackEngine
-func (pe *PlaybackEngine) Run(ctx context.Context)             // owns the clock + tick goroutine
-func (pe *PlaybackEngine) ResetCursors()                        // called after project swap
+type TimedEvent struct {
+    Tick  int64
+    Event midi.Event
+}
+
+func NewPlaybackEngine(project *model.Project, out midi.ToExternal, compileCh chan<- int) *PlaybackEngine
+func (pe *PlaybackEngine) Run(ctx context.Context)
+func (pe *PlaybackEngine) ResetCursors()  // called after project swap
 ```
 
-Single goroutine: reads `project` state under per-track RLock (briefly), walks events without lock, dispatches MIDI via `out`. Writes only its own cursors + `Project.Tick` (atomic), plus brief Lock for Schedule boundary promotion.
+#### controller/compile.go
+
+```go
+package controller
+
+type Compiler struct {
+    project    *model.Project
+    nextEvents *[8]atomic.Pointer[CompiledPattern]
+    compileCh  <-chan int
+}
+
+func (c *Compiler) Run(ctx context.Context):
+    for trackIdx := range c.compileCh:
+        c.compileTrack(trackIdx)
+
+func (c *Compiler) compileTrack(trackIdx int):
+    track := c.project.Tracks[trackIdx]
+    seed := uint64(time.Now().UnixNano()) ^ uint64(trackIdx) ^ counter.Add()
+    track.mu.RLock()
+    defer track.mu.RUnlock()
+    switch track.Type:
+        case Drum:       events = devices.Drum.Compile(track.Drum, seed)
+        case Piano:      events = devices.Piano.Compile(track.Piano, seed)
+        case Metropolix: events = devices.Metropolix.Compile(track.Metropolix, seed)
+    c.nextEvents[trackIdx].Store(&events)
+```
+
+The compile goroutine serializes all compiles across all tracks. Simpler than per-track goroutines. If compile is fast (microseconds), this is totally fine. If ever a bottleneck, split into per-track goroutines or a worker pool.
 
 #### controller/input.go
 
@@ -375,25 +450,21 @@ Single goroutine: reads `project` state under per-track RLock (briefly), walks e
 package controller
 
 type InputManager struct {
-    project *model.Project
-    out     midi.ToExternal        // for preview MIDI
-    in      midi.FromExternal      // for incoming MIDI events
-    surface surface.Surface
-    focused FocusTarget
+    project   *model.Project
+    out       midi.ToExternal
+    in        midi.FromExternal
+    surface   surface.Surface
+    focused   FocusTarget
+    compileCh chan<- int
 }
 
-type FocusTarget struct {
-    Kind  FocusKind   // Track, Settings, Save, Session
-    Track int         // valid when Kind == Track
-}
-
-func NewInputManager(project *model.Project, out midi.ToExternal, in midi.FromExternal, surface surface.Surface) *InputManager
-func (im *InputManager) Run(ctx context.Context)                // listens to surface.PadEvents() + MIDI in subscriptions
-func (im *InputManager) HandleKey(key string)                   // called by view
-func (im *InputManager) HandlePad(row, col int)                 // also callable directly (tests)
+func NewInputManager(project *model.Project, out midi.ToExternal, in midi.FromExternal, surface surface.Surface, compileCh chan<- int) *InputManager
+func (im *InputManager) Run(ctx context.Context)
+func (im *InputManager) HandleKey(key string)
+func (im *InputManager) HandlePad(row, col int)
 ```
 
-Receives input events, mutates state (directly or by routing to focused device). Writes spec fields, schedule, transport, and triggers recompilation via device `Compile`.
+InputManager acquires the track's RWMutex for writes. After any write that affects a track's compiled events (edit, queue), sends the trackIdx on `compileCh`.
 
 #### controller/project.go
 
@@ -401,23 +472,22 @@ Receives input events, mutates state (directly or by routing to focused device).
 package controller
 
 func SaveProject(p *model.Project, path string) error
-func LoadProject(path string) (*model.Project, error)   // reads, unmarshals, Validate, recompiles all patterns
+func LoadProject(path string) (*model.Project, error)
 ```
 
 #### controller/devices/
 
-Each device is an empty struct with value-receiver methods. No fields.
+Each device is an empty struct with value-receiver methods. Pure compilers + input handlers + renderers.
 
 ```go
 package devices
 
 type Drum struct{}
 
-// pure compile
-func (Drum) Compile(human *model.DrumHuman) *model.MachinePattern
+// pure compile — spec + seed → compiled pattern
+func (Drum) Compile(spec *model.Drum, seed uint64) CompiledPattern
 
-// input handlers — mutate state directly; recompile by calling own Compile
-// caller (InputManager) holds the per-track Lock; devices never touch locks
+// input handlers — mutate state; caller holds the track's Lock
 func (Drum) HandlePad(state *model.Drum, project *model.Project, out midi.ToExternal, row, col int)
 func (Drum) HandleKey(state *model.Drum, project *model.Project, out midi.ToExternal, key string)
 func (Drum) HandleMIDI(state *model.Drum, out midi.ToExternal, ev midi.Event)
@@ -427,42 +497,7 @@ func (Drum) Render(state *model.Drum, project *model.Project) string
 func (Drum) RenderLEDs(state *model.Drum, project *model.Project) []surface.LED
 ```
 
-Same shape for `Piano`, `Metropolix`, `Session`, `Settings`, `Empty`. Session/Settings don't have `Compile` (they don't sequence patterns).
-
-#### controller/midi/
-
-```go
-package midi
-
-type Event struct {
-    Type     EventType
-    Note     uint8
-    Velocity uint8
-    Channel  uint8
-    // ...
-}
-
-// Small interfaces — principle of least privilege. Each engine takes only what it needs.
-
-type ToExternal interface {
-    Send(portName string, channel uint8, ev Event) error
-}
-
-type FromExternal interface {
-    // Subscribe returns a channel of events matching both filters.
-    // Buffer: 64 events; overflow drops oldest.
-    // Multiple subscribers for the same (port, channel) each get an independent copy.
-    Subscribe(portName string, channel uint8) (<-chan Event, error)
-}
-
-type Ports struct { ... }  // implements both ToExternal and FromExternal
-
-func NewPorts() (*Ports, error)
-func (p *Ports) Send(portName string, channel uint8, ev Event) error
-func (p *Ports) Subscribe(portName string, channel uint8) (<-chan Event, error)
-func (p *Ports) List() []PortInfo
-func (p *Ports) Close() error
-```
+Compile is the only method that takes a seed (because it's the only one doing rolls). Handlers mutate spec; compile is triggered externally by InputManager via the channel.
 
 #### controller/surface/
 
@@ -475,16 +510,8 @@ type Surface interface {
     Close() error
 }
 
-type PadEvent struct {
-    Row, Col int
-    Down     bool
-}
-
-type LED struct {
-    Row, Col int
-    R, G, B  uint8  // semantic; surface maps to hardware
-}
-
+type PadEvent struct { Row, Col int; Down bool }
+type LED struct { Row, Col int; R, G, B uint8 }
 type Launchpad struct { ... }
 type Mock struct { ... }
 ```
@@ -493,30 +520,80 @@ type Mock struct { ... }
 
 ## 6. Concurrency model
 
-Goroutines share `*model.Project`:
+Three core goroutines:
 
-| Goroutine                       | Reads                                      | Writes                                           |
-|---------------------------------|--------------------------------------------|--------------------------------------------------|
-| PlaybackEngine.Run              | pattern.Machine.Events (under RLock), Schedule, Tracks, Transport | cursors (own), Project.Tick, Schedule.Playing/Queued at boundary (under Lock) |
-| InputManager.Run                | surface pad events                         | patterns (under Lock via device Compile), spec, Schedule.Queued, transport |
-| InputManager.HandleKey (view)   | everything                                 | same as InputManager.Run                         |
+| Goroutine                    | Reads                                          | Writes                                         |
+|------------------------------|------------------------------------------------|------------------------------------------------|
+| PlaybackEngine.Run           | current_events (atomic), next_events (atomic) | cursors, pe.tick (atomic), current_events (atomic swap at wrap), next_events (atomic clear at wrap), Schedule.Playing/Queued at wrap boundary (under Track.mu Lock, brief) |
+| Compiler.Run                 | project state under Track.mu (RLock), editCounters (atomic) | next_events (atomic store)                     |
+| InputManager (Run + HandleKey)| surface pad events, spec                      | spec fields, Schedule (under Track.mu Lock); pe.playing, pe.t0 via methods; editCounters (atomic inc); sends to compileCh |
 
-- **Per-track `sync.RWMutex`** on each device state (Drum, Piano, Metropolix). Guards Patterns (both Human and Machine.Events) and Schedule. **All Lock/Unlock calls are made by InputManager (writer side) or PlaybackEngine (boundary promotion only).** Devices themselves are lock-unaware.
-- **Tick read path**: PlaybackEngine takes RLock briefly each iteration to grab a consistent snapshot of the events slice header + schedule values; walks events without lock (slice backing array immutable — input replaces, never mutates in place).
-- **Input write path**: InputManager Lock → call device handler (mutates state, may call Compile) → Unlock. Devices never touch the lock.
-- **Schedule boundary promotion**: PlaybackEngine takes a brief Lock to promote `Queued → Playing`. The only place PlaybackEngine writes anything other than its own cursors. User queueing (via InputManager) takes the same Lock to set `Queued`. Whoever gets the lock first runs; user's queue is always honored on the next boundary after they set it.
-- **Cursors**: owned by PlaybackEngine. Not shared, no lock needed.
-- **Project.Tick, Project.Transport.Playing**: `atomic.Int64` and `atomic.Bool`.
-- **Project pointer swap (load)**: only happens when Transport.Playing == false, so no concurrent tick reads. Simple pointer assignment.
+### Synchronization primitives
+
+- **`current_events[i]`, `next_events[i]`**: `atomic.Pointer[CompiledPattern]`. Lock-free reads. Playback loads, compile stores. Atomic swap at wrap.
+- **`Track.mu` (sync.RWMutex)**: protects the spec fields. InputManager takes Lock to mutate; Compile goroutine takes RLock to read; View takes RLock to render. Playback does NOT touch spec — only reads events. Contention expected to be trivial (View 60Hz + sporadic compile + bursty writes). If it ever becomes a bottleneck, upgrade to COW snapshots (atomic pointer per spec) — noted in open questions.
+- **`editCounters[i]`**: `atomic.Uint64`. InputManager increments on any edit to track i. Compiler reads and stores on the resulting CompiledPattern, for stale-detection at wrap.
+- **`compileCh chan int`**: buffered ~16. InputManager sends trackIdx when a track's events need regenerating (edit, queue, MIDI recording, wrap promotion). Buffered so sender doesn't block.
+- **`pe.tick`, `pe.playing`**: `atomic.Int64` and `atomic.Bool`. Owned by PlaybackEngine. `pe.t0` is a plain `time.Time` written only when playing transitions (under a brief write lock) and read only by the tick goroutine.
+
+### Why this works
+
+- Playback never blocks: loads atomic pointer, walks events, done.
+- Compile never blocks playback: produces into `next_events` which playback reads via atomic load.
+- InputManager briefly blocks compile/view when writing spec under the track mutex — but writes are bursty and sub-millisecond.
+- Fresh rolls: every compile uses a new seed; every loop sounds different.
+- Fallback: if `next_events` is nil when wrap happens (compile overran), playback re-uses current for another loop. Logs a warning. Should never happen in practice (compile is microseconds).
+
+### Single-writer per field
+
+- Playback writes: cursors, Project.Tick, atomic swap on current/next_events
+- Compiler writes: next_events (atomic store only)
+- InputManager writes: everything else — spec, schedule, transport, focus
 
 ---
 
-## 7. Open questions
+## 7. Compile invariants and PRNG
 
-1. **Device interface typing** — each device has its own state type. A unified `Device` interface needs `any` + runtime assertions, or we drop the interface and use type switches in the manager. Leaning type switches.
-2. **Persisting machine patterns** — currently `json:"-"`, regenerated on load. Alternative: persist them, skip regen. Default: regenerate on load.
-3. **Save format compatibility** — the restructure breaks JSON tags (e.g., new `human` nesting). Pre-1.0; break is acceptable.
-4. **Clock goroutine back-pressure** — channel-based tick can drop ticks. Consider a timer-in-tickLoop design instead.
+### Compile contract
+
+- Pure function of (spec, seed). Same inputs → same output. Seed is the only source of non-determinism.
+- Fast: target sub-millisecond for typical patterns, low-millisecond for dense Metropolix with many stages/ratchets.
+- No side effects: no I/O, no mutation of the spec, no global state.
+
+### Seed generation
+
+```
+seed = nanosecond_timestamp ^ trackIdx ^ loop_counter
+```
+
+Loop counter is an atomic `uint64` incremented on every compile. Every compile gets a unique seed regardless of clock resolution.
+
+Seeds are logged at info level (or higher) so reproducing "that cool accidental pattern" is possible via a "replay seed" UI action.
+
+### PRNG implementation
+
+Use **xorshift64** or similar in `controller/devices/rng.go`. Go's `math/rand` default has poor statistical quality; xorshift is fast and has well-understood properties.
+
+```go
+type Rng struct { state uint64 }
+func (r *Rng) Seed(s uint64) { r.state = s | 1 /* avoid 0 */ }
+func (r *Rng) Next() uint32 {
+    r.state ^= r.state << 13
+    r.state ^= r.state >> 7
+    r.state ^= r.state << 17
+    return uint32(r.state)
+}
+func (r *Rng) Probability(pct uint8) bool { return r.Next() % 100 < uint32(pct) }
+```
+
+### Fresh-roll trigger points
+
+Compile is called with a fresh seed (via the compileCh signal) on:
+- Pattern edit (step toggle, note change, stage parameter change)
+- Pattern queue (Schedule.Queued set)
+- Wrap boundary (playback promotes next → current, signals compile for a new next)
+- MIDI input that records into the pattern
+- Project load
 
 ---
 
@@ -526,24 +603,34 @@ Goroutines share `*model.Project`:
 
 - `Tempo` ∈ [20, 300]
 - Per-track `Schedule.Playing` ∈ [0, NumPatterns-1]
-- Per-track `Schedule.Queued` ∈ [-1, NumPatterns-1]  (−1 means nothing queued)
+- Per-track `Schedule.Queued` ∈ [-1, NumPatterns-1]
 - Pattern lengths ≥ 1 (prevents divide-by-zero in tick modular math)
-- `Track.Type` must match exactly one non-nil device field (`Drum`/`Piano`/`Metropolix`)
-- Drum/Piano/Metropolix-specific field ranges (pitch 0-127, velocity 0-127, probability 0-100, etc.)
+- `Track.Type` must match exactly one non-nil device field
+- Drum/Piano/Metropolix-specific ranges (pitch 0-127, velocity 0-127, probability 0-100)
 
-Edge cases handled by design, not special-case code:
+Edge cases handled by design:
 
-- **Tempo = 0** — tick interval becomes infinite, no ticks advance. Equivalent to paused. Valid internal state; UI prevents setting tempo below 20 via `Validate()`.
-- **Pattern length = 0** — clamped to 1 in `Validate()` and by a defensive `max(plen, 1)` at tick time.
-- **Probability = 0 / 100** — never fires / always fires. Boundary cases of the rollProbability function.
-- **Queue during promotion** — mutex serializes. Whichever write gets the lock first runs; user's queue always honored on the next boundary.
-- **Pattern length change mid-play** — cursor modular-wraps via `cursor.Tick %= plen` at next tick. No special handler.
-- **Track has no device type** — `Track.Type == None` → skip in tick loop, skip in render.
+- **Tempo = 0** → infinite tick interval → no ticks advance. Equivalent to paused. UI prevents ≤ 20 via Validate.
+- **Pattern length = 0** → clamped to 1.
+- **Queue during wrap** — under mutex serialization, the queued pattern either gets compiled in time for the wrap (best case) or compiles during the next iteration (still works, just one loop of "same as before" delay).
+- **Compile overrun** — `next_events` is nil at wrap. Playback reuses current. Logs warning. Rare in practice.
+- **Pattern length change mid-play** — cursor modular-wraps at next tick (`cursor.Tick %= plen`). No special handler.
 
-## 9. Out of scope (future work)
+---
 
-- **Named pattern chains** ("meta-patterns") — reusable sequences of patterns that queue as a single unit (e.g., "Chorus" = [D, E, F]). Schedule extends cleanly to reference either a pattern or a chain via a small kind enum. Deferred to v2.
-- Multi-controller support (`Surface` interface admits this).
-- VST hosting (not a DAW).
-- Audio output (MIDI only; route to softsynth for sound).
-- MIDI clock out (eventually).
+## 9. Open questions
+
+1. **Per-track compile goroutines vs one shared compile goroutine?** Plan starts with one. If profiling shows bottleneck (unlikely for this workload), upgrade to a worker pool. Flagged as "decide later."
+2. **Save format compatibility** — pre-1.0; breaking existing JSON is acceptable.
+3. **Triple-buffering** (current / next / rendering) if double isn't enough safety against compile overruns. Defer; double is fine for expected load.
+
+---
+
+## 10. Out of scope (future work)
+
+- **True per-step rolling** (hardware-style live roll vs. our pre-rendered buffer). Our approach has fresh rolls per loop, not per step. For Metropolix's 8-stage patterns this is indistinguishable from per-step. For 64-step drum patterns, the re-roll point is the pattern boundary — arguably noticeable but low priority.
+- **Named pattern chains** ("meta-patterns") — reusable sequences of patterns that queue as a single unit. Schedule extends cleanly to reference either a pattern or a chain via a small kind enum. Deferred to v2.
+- **Multi-controller support** (`Surface` interface admits this).
+- **VST hosting** (not a DAW).
+- **Audio output** (MIDI only; route to softsynth for sound).
+- **MIDI clock out** (eventually).
