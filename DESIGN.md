@@ -111,4 +111,23 @@ human pattern - (machine pattern a, machine pattern b)
 idk what the model types look like for each device, and ikd if this is too complex as it is for you to figure it out, if it is I can come up with those too
 
 
+i'm wondering what's really going to be in the view code
+
+can the view code update the human pattern based on the user input? i feel like it could
+
+that does feel like some heavy lifting for the view code
+
+but if that's the case, then the only thing that the device controller does is compile, which sounds nice
+
+so yea
+
+then 
+
+view does a lot, it gets into state and manages it? or is that too cursed. I feel like, making a controller do it is also strange, you know, i really think that the view can just do this
+
+the view is just a funciton that visually shows the human pattern, beause of this, it necissarily udnerstand the human pattern, and therefore is a good play to edit it.
+
+
+
+
 
