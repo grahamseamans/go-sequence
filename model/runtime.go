@@ -46,6 +46,11 @@ type UIState struct {
 	Focus            FocusTarget
 	LastFocusedTrack int // remembered when user navigates away from a track view
 
+	// KeyboardRoute is the track index (0..7) that external MIDI keyboard
+	// input is routed to. One keyboard, one destination track at a time.
+	// Defaults to 0.
+	KeyboardRoute int
+
 	// SystemProject is the entire project-browser widget state (cursor,
 	// edit-mode buffer, cached save list). Lives here — not in a separate
 	// singleton — because it's UI state belonging to the project, and

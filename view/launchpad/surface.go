@@ -1,4 +1,4 @@
-package surface
+package launchpad
 
 // Surface is a control surface — a grid of pads with RGB LEDs.
 // Launchpad X is the reference implementation. Mock exists for tests.

@@ -13,9 +13,9 @@
 // skips leftover *.tmp.json files.
 //
 // LoadProject does NOT stop playback or trigger a recompile. Per DESIGN §4.5
-// that is the input router's job: after swapping the project state in, it
-// sends one compile request per track so the compile goroutine re-renders
-// against the fresh specs.
+// that is the view layer's job: after calling SaveOps.Load, the project-
+// browser view pauses playback and calls controller.MarkPlayingDirty for
+// each track so the compile goroutine re-renders against the fresh specs.
 //
 // controllerSaveOps wraps the package-level helpers and implements
 // save.SaveOps so that controller/devices/save can stay ignorant of
@@ -211,9 +211,9 @@ func RenameSave(oldName, newName string) error {
 }
 
 // controllerSaveOps is the save.SaveOps implementation that forwards to the
-// package-level Save/Load/List/Delete/Rename functions. Injected into
-// RunInput / HandleKey so controller/devices/save doesn't need to import
-// controller/ (which would create a cycle).
+// package-level Save/Load/List/Delete/Rename functions. Injected into the
+// view dispatchers (view/launchpad, view/tui) so the save package doesn't
+// need to import controller/ (which would create a cycle).
 type controllerSaveOps struct{}
 
 // NewControllerSaveOps returns the concrete SaveOps impl for injection.
