@@ -46,7 +46,7 @@ basic vibe (from human, so badly written, but actually good design hopefully)
 
 The way that this machine works is
 
-you have a basically endlessly polling loop
+you have a basically endlessly polling loop (for playback engine)
 
 it, based on time, figures where to read from, reads from it, and puts that out midi
 
@@ -199,3 +199,6 @@ if that's longer than the pattern you're done with it
 
 
 
+views call the compile too, they edit the model, and then say, hey dude, i just edited it, you need to now remake those patterns.
+The fucked thing is that, it needs to actually replace the pattern that the playack engine is reading from (and the other machine pattern)
+this is why we dont store the playhead itself, and calculate it each time for each pattern instead.
