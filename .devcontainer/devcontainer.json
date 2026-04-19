@@ -44,10 +44,10 @@
   },
   "remoteUser": "node",
   "mounts": [
-    "source=go-sequence-bashhistory-${devcontainerId},target=/commandhistory,type=volume",
-    "source=go-sequence-claude-config-${devcontainerId},target=/home/node/.claude,type=volume",
-    "source=go-sequence-gocache-${devcontainerId},target=/home/node/.cache/go-build,type=volume",
-    "source=go-sequence-gomodcache-${devcontainerId},target=/home/node/go/pkg/mod,type=volume"
+    "source=${localWorkspaceFolderBasename}-bashhistory,target=/commandhistory,type=volume",
+    "source=${localWorkspaceFolderBasename}-claude-config,target=/home/node/.claude,type=volume",
+    "source=${localWorkspaceFolderBasename}-gocache,target=/home/node/.cache/go-build,type=volume",
+    "source=${localWorkspaceFolderBasename}-gomodcache,target=/home/node/go/pkg/mod,type=volume"
   ],
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
@@ -63,5 +63,6 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
   "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+  "postAttachCommand": "cd ~/dotfiles && git pull --ff-only && ./install.sh",
   "waitFor": "postStartCommand"
 }
