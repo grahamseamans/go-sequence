@@ -3,10 +3,9 @@ package model
 import (
 	"fmt"
 	"sync"
-)
 
-// NumPatterns is the fixed number of patterns per device, per track.
-const NumPatterns = 16
+	"go-sequence/model/devices"
+)
 
 // DeviceKind tags which device (if any) a track uses. Empty string means no
 // device is assigned.
@@ -40,9 +39,9 @@ type Track struct {
 	Muted      bool         `json:"muted"`
 	Solo       bool         `json:"solo"`
 	mu         sync.RWMutex `json:"-"`
-	Drum       *Drum        `json:"drum,omitempty"`
-	Piano      *Piano       `json:"piano,omitempty"`
-	Metropolix *Metropolix  `json:"metropolix,omitempty"`
+	Drum       *devices.Drum       `json:"drum,omitempty"`
+	Piano      *devices.Piano      `json:"piano,omitempty"`
+	Metropolix *devices.Metropolix `json:"metropolix,omitempty"`
 }
 
 // Lock acquires the track's write lock. Used by InputManager on mutations.
@@ -104,21 +103,21 @@ func (p *Project) Validate() {
 			t.Metropolix = nil
 		case DeviceDrum:
 			if t.Drum == nil {
-				t.Drum = &Drum{}
+				t.Drum = &devices.Drum{}
 			}
 			t.Piano = nil
 			t.Metropolix = nil
 			t.Drum.Validate()
 		case DevicePiano:
 			if t.Piano == nil {
-				t.Piano = &Piano{}
+				t.Piano = &devices.Piano{}
 			}
 			t.Drum = nil
 			t.Metropolix = nil
 			t.Piano.Validate()
 		case DeviceMetropolix:
 			if t.Metropolix == nil {
-				t.Metropolix = &Metropolix{}
+				t.Metropolix = &devices.Metropolix{}
 			}
 			t.Drum = nil
 			t.Piano = nil

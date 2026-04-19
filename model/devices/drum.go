@@ -1,4 +1,4 @@
-package model
+package devices
 
 // DrumStep is one step in a drum note lane.
 type DrumStep struct {

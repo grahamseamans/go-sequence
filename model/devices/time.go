@@ -1,4 +1,4 @@
-package model
+package devices
 
 const PPQ = 960 // ticks per quarter note
 

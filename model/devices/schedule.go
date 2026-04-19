@@ -1,4 +1,7 @@
-package model
+package devices
+
+// NumPatterns is the fixed number of patterns per device, per track.
+const NumPatterns = 16
 
 // Schedule describes which pattern is currently playing on a track and
 // which (if any) is queued to play next. Queued == -1 means "nothing queued".

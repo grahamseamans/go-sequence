@@ -1,4 +1,4 @@
-package model
+package devices
 
 // NoteEvent is a single note in a piano roll pattern. Start and Duration are
 // in beats (matches current Piano usage); units may be reconciled later.

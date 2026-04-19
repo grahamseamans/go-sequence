@@ -1,4 +1,4 @@
-package model
+package devices
 
 // PlaybackMode selects how the Metropolix walks through its active stages.
 type PlaybackMode int

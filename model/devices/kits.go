@@ -1,4 +1,4 @@
-package model
+package devices
 
 // Kit maps 16 drum slot indices to MIDI notes.
 // Slot order: 0 Kick, 1 Snare, 2 Closed HH, 3 Open HH, 4 Low Tom, 5 Mid Tom,
