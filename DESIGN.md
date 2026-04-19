@@ -211,6 +211,12 @@ When the view changes the human readable part of the ting, it just goes, for hum
 
 there should be:
 
-view/devices/tui/*/
-view/devices/launchpad/*/
-view/devices/keyboard/*/
+view/tui/*/
+view/launchpad/*/
+view/keyboard/*/
+
+
+view/tui/utils.go
+view/tui/drum.go
+view/tui/project.go
+(idk about the actual naming with caps and stuff, please make it normal)
