@@ -6,262 +6,246 @@ monolith into the MVC shape described in `DESIGN.md`.
 Read `DESIGN.md` first — it is the source of truth for the target architecture.
 This document answers "in what order do we build it."
 
-Revised 2026-04-19 after Grok design review: architecture shifted to
-double-buffered async pre-rendering with a dedicated compile goroutine.
-Transport state moved out of Model. Machine patterns no longer persisted —
-compiled events live only in PlaybackEngine's runtime state.
+**Revised 2026-04-19 (second pass):** earlier pass committed Steps 1-4 with
+"device" Go types that bundled state + Compile + HandlePad + Render methods
+into one struct. That's a layer-violation — devices aren't Go types,
+they're conceptual entities split across model/controller/view at parallel
+paths. This revision adds a restructuring step and reshapes Steps 3 and 5.
+
+**Revised 2026-04-19 (third pass):** doubled down on the principle. Model
+owns ALL state, including runtime state (playback cursors/events, compile
+channel, UI focus). Controller is JUST bags of functions — no struct
+types anywhere in controller. `PlaybackEngine struct` / `Compiler struct` /
+`InputManager struct` all become `func RunPlayback(ctx, project)` etc.
+No "manager" types. View handles UI input (pad/keyboard) and rendering;
+controller handles external MIDI input. Input never mutates state
+directly — always goes through controller mutator functions in
+`controller/devices/<kind>.go`. Check DESIGN.md for current canonical
+architecture; this plan's step contents may trail.
 
 ---
 
-## Verified current state (as of 2026-04-19)
+## Verified current state (as of 2026-04-19, after first pass)
 
-`go build ./...` passes. ~8,500 LOC of project code.
+`go build ./...` passes. Steps 1, 2, 3a-e, 4 committed.
 
-| Path | Current MVC role |
-|---|---|
-| `sequencer/state.go` (501) | Mostly Model — Project and per-device state, `var S *State` global |
-| `sequencer/device.go` (62) | Controller interface |
-| `sequencer/drum.go` (871) | Controller + View (device holds schedule, queue, preview chan) |
-| `sequencer/pianoroll.go` (997) | Controller + View |
-| `sequencer/metropolix.go` (1418) | Controller + View |
-| `sequencer/manager.go` (810) | Engine: tick/queue/MIDI/LED goroutines |
-| `sequencer/session.go` (335) | Controller UI, holds `*Manager` pointer |
-| `sequencer/settings.go` (596) | Controller UI, note-input flag |
-| `sequencer/save.go` (497) | Controller UI, calls recreateDevicesFromState |
-| `sequencer/empty.go` (104) | Controller UI stub |
-| `sequencer/project.go` (313) | Model persistence |
-| `sequencer/kits.go` (129) | Model data |
-| `midi/` (~700) | OS port I/O + Launchpad |
-| `tui/model.go` (271) | View (Bubbletea) |
-| `widgets/`, `theme/`, `palettes/`, `debug/`, `config/`, `cmd/miditest/` | Infra, keep |
+**What's correct already:**
+- `model/` skeleton with state types
+- `midi/` at repo root with Event/EventType/Ports
+- `controller/surface/` with Launchpad + Mock
+- `controller/playback.go` — PlaybackEngine + double-buffer
+- `controller/compile.go` — Compiler goroutine
+- `controller/input.go` — InputManager
+- Per-track RWMutex
+- compileCh + editCounters
+- Schedule = {Playing, Queued}
 
-### Key structural mismatches to resolve
-
-- **Schedule format**: current `{StartTick, Patterns []int}` → target `{Playing, Queued}` (breaks JSON; pre-approved).
-- **No machine pattern in Model**: current = per-device queue filled/peeked/popped → target = events live only in PlaybackEngine's `current_events` / `next_events` (runtime state, not persisted, never in Model).
-- **Transport/Tick out of Model**: current = various flags/fields in `State` and `Manager` → target = owned by PlaybackEngine (atomic types), not in `model.Project`.
-- **State singleton**: current `sequencer.S` global → target `*model.Project` passed at construction.
-- **Devices with fields**: current schedule+queue+callback+previewChan on device → target empty structs (`var Drum devices.Drum`). Pure compilers (`Compile(spec, seed)`), no stored state.
-- **Locking**: current single global `Manager.mu` → target per-track `sync.RWMutex` on each device state.
-- **Preview MIDI**: current preview chan + goroutine → target direct `out.Send()` in handler.
-- **Probability**: current = not yet implemented consistently → target = rolled at compile time (fresh seed per compile → fresh rolls every loop).
-- **Compile goroutine is new**: no equivalent today. Consumes `compileCh`, produces `next_events`. Separate from PlaybackEngine.
+**What needs restructuring:**
+- `controller/devices/<kind>.go` files contain `type Drum struct{}` etc. with methods like `Compile`, `HandlePad`, `Render`, `RenderLEDs` all on the struct. Smushes controller and view concerns into one type. Needs splitting.
+- `controller/project.go` exists for save/load, but should live at `controller/system/project.go`. The Save UI also needs to move from `controller/devices/save.go` to `view/system/project.go`.
+- Settings, Session, Empty similar — they're system widgets, not devices. Move from `controller/devices/` to `controller/system/` (functions) + `view/system/` (UI).
+- View doesn't exist as a real package yet — currently `tui/` is empty / unported.
 
 ---
 
-## Implementation plan
+## Implementation plan (restructured)
 
-Each step ends buildable (`go build ./...` passes) and ideally runnable. Size: **S** ≤1h, **M** ~half-day, **L** ~day, **XL** multi-day.
+Each step ends buildable. Sizes: **S** ≤1h, **M** ~half-day, **L** ~day, **XL** multi-day.
 
-### Step 1 — `midi/` at root + skeleton `model/` (M)
+### Step 1 — Already done ✓
 
-Two pieces, both near-mechanical:
+`midi/` at root + `model/` skeleton committed. Some adjustments needed:
+- Check `model/` has `model/devices/` and `model/system/` subdirs (move drum/piano/metropolix into `model/devices/`; add `model/system/project.go` etc. for system-widget state if there's any beyond what's in the main Project struct).
 
-**midi/ at repo root** (NOT inside controller/):
-- Move `midi/event.go` in place (tweak: `Type uint8` → `Type EventType`).
-- `midi/ports.go`: `Ports` struct implementing `ToExternal.Send` and `FromExternal.Subscribe` (64-buffer, oldest-drop on overflow).
-- `midi/interfaces.go`: `ToExternal`, `FromExternal`.
-- `midi/keyboard.go`: keyboard controller port input (carried over from current `midi/keyboard.go`).
-- Leave `midi/launchpad.go` — Step 2 relocates to `controller/surface/`.
+### Step 2 — Already done ✓
 
-**model/ skeleton** (no machine fields):
-- `model/project.go` — `Project{Tempo, Tracks}`, `DeviceKind`, `NumPatterns` const, `New()`, `Validate()`. NO Transport, NO Tick — those live in PlaybackEngine.
-- `model/drum.go` — `Drum` (with `sync.RWMutex`), `DrumPattern{Notes, Length}`, `NoteLane`, `DrumStep`. No Machine field, no Events field.
-- `model/piano.go` — `Piano`, `PianoPattern` (spec only).
-- `model/metropolix.go` — `Metropolix`, `MetropolixPattern` (spec only), `PlaybackMode`, `ScaleType`.
-- `model/schedule.go` — `Schedule{Playing int, Queued int}`.
-- `model/kits.go` — drum kit maps.
-- `model/time.go` — `PPQ` const (960), tick helpers.
-- `model/persist.go` — *placeholder*; Save/Load move to `controller/project.go` in Step 4.
+`controller/surface/` with Launchpad + Mock.
 
-`sequencer/` still builds because it keeps its own types; `midi/` and `model/` are parallel but unreferenced.
+### Step 3 — RESTRUCTURE: split "device" structs into per-layer free functions (L)
 
-**Verify**: `go build ./...` passes.
+The in-container Claude built `controller/devices/drum.go` with `type Drum struct{}` and methods. Restructure each device:
 
-### Step 2 — `controller/surface/` (S)
+For each musical device (drum, piano, metropolix):
 
-- `controller/surface/surface.go`: `Surface` interface, `PadEvent`, `LED{R,G,B uint8}`.
-- `controller/surface/launchpad.go`: port from current `midi/launchpad.go`. Uses `midi` at root for sending/receiving raw bytes.
-- `controller/surface/mock.go`: MockSurface — injects pad events, records `SetLEDs` frames for test assertions.
+**3a. Move state into `model/devices/`** if not already there.
+```go
+// model/devices/drum.go
+package devices  // or each its own subpackage
 
-No `controller/midi/` package — `midi/` at root serves both model and controller.
+type Drum struct {
+    Patterns [16]DrumPattern
+    Schedule Schedule
+    // ...
+}
+```
 
-**Verify**: `go build ./... && go test ./controller/surface`.
+**3b. Replace `controller/devices/<kind>.go` smushed type with free functions.**
 
-### Step 3 — `controller/devices/` pure compilers (L)
+Currently:
+```go
+type Drum struct{}
+func (Drum) Compile(state *model.Drum, seed uint64) CompiledPattern { ... }
+func (Drum) HandlePad(state *model.Drum, ...) { ... }
+func (Drum) Render(state *model.Drum, ...) string { ... }
+```
 
-Each device is an empty struct. The Compile method is the workhorse.
+Become:
+```go
+// controller/devices/drum.go
+package drum   // or package devices with subdirs
 
-- `controller/devices/drum.go`:
-  - `type Drum struct{}`
-  - `Compile(spec *model.Drum, seed uint64) CompiledPattern` — pure function. For each active step in the current playing pattern, emit `TimedEvent{Tick, midi.Event}`. Uses Drum-specific logic (kit translation, velocities). Seed controls any random behavior (currently none for drum, but signature is uniform across devices).
-  - `HandlePad(state *model.Drum, project *model.Project, out midi.ToExternal, row, col int)` — mutates spec; caller holds track lock.
-  - `HandleKey(state, project, out, key)`, `HandleMIDI(state, out, event)` — same pattern.
-  - `Render(state, project) string`, `RenderLEDs(state, project) []surface.LED`.
-- `controller/devices/piano.go`: same shape. Compile produces TimedEvents per MIDI-style note (on at tick, off at tick+duration).
-- `controller/devices/metropolix.go`: same shape. **Compile is the ONE place probability rolls happen** — using the provided seed + xorshift RNG. Accumulators evolve during compile.
-- `controller/devices/session.go`, `settings.go`, `empty.go`: no `Compile` method (don't generate events). `HandlePad` still mutates state (e.g., Session sets `Schedule.Queued`).
-- `controller/devices/save.go`: former SaveDevice. `HandleKey` delegates to `controller.SaveProject/LoadProject` — injected as callback to avoid import cycle.
-- `controller/devices/kits.go` (OR in `model/kits.go` — decide during impl): drum kit maps. Kit note translation lives in `Drum.Compile` so TimedEvents carry pre-resolved MIDI notes.
-- `controller/devices/rng.go`: xorshift64 PRNG struct. Devices' Compile methods use this — NOT `math/rand`.
+func Compile(state *devices.Drum, seed uint64) controller.CompiledPattern { ... }
+func ToggleStep(state *devices.Drum, lane, step int) { ... }
+func ClearPattern(state *devices.Drum, idx int) { ... }
+// no Handle*, no Render — those move to view/
+```
 
-Co-locate small boundary tests as each device lands.
+**3c. Move Render/RenderLEDs into `view/devices/<kind>.go`.**
+```go
+// view/devices/drum.go
+package drumview   // or appropriate
 
-**Verify**: `go build ./... && go test ./controller/devices/...`. Drum compile of a one-step pattern emits exactly one event at the right tick.
+func Render(state *devices.Drum, project *model.Project) string { ... }
+func RenderLEDs(state *devices.Drum, project *model.Project) []surface.LED { ... }
+func HandlePad(state *devices.Drum, project *model.Project, row, col int) {
+    // interpret gesture in drum context, call controller/devices/drum mutators
+    drum.ToggleStep(state, lane, step)
+}
+func HandleKey(state *devices.Drum, project *model.Project, key string) { ... }
+func HandleMIDI(state *devices.Drum, ev midi.Event) { ... }
+```
 
-### Step 4 — `controller/playback.go` + `input.go` + `compile.go` + `project.go` (L)
+For each system widget (project/save, settings, session, empty):
 
-Four files, each with a single responsibility.
+**3d. Move state to `model/system/<kind>.go`** if any per-widget state exists.
+**3e. Functions go to `controller/system/<kind>.go`.** SaveProject/LoadProject etc. move out of `controller/project.go` into `controller/system/project.go`.
+**3f. UI goes to `view/system/<kind>.go`.**
 
-**`controller/playback.go`** — tick loop + double-buffer:
-- `type PlaybackEngine struct{ project, out, cursors, currentEvents[8], nextEvents[8], compileCh, lastGlobalTick, playing(atomic.Bool), t0(time.Time), tick(atomic.Int64), editCounters[8] }`.
-- `type CompiledPattern struct{ Events []TimedEvent, Length int64, EditCounter uint64 }`.
-- `type TimedEvent struct{ Tick int64, Event midi.Event }` — lives here, not in model.
-- `Run(ctx)` spawns tick goroutine. On each tick: load `current_events`, walk for events in (prev, now], dispatch via `out.Send(track.PortName, track.Channel, ev)`. On wrap: atomic-swap current←next, emit `compileCh <- track` to request a new next.
-- Wrap handling: if next is nil AND current is stale (EditCounter < editCounters[track]), sync-compile. Else reuse current.
-- Delta clamping: if `delta > MAX_DELTA_TICKS`, clamp to 1.
-- `Play() / Pause() / SetTempo(bpm)` — public methods for InputManager. Mutates `playing`, `t0`.
+**Verify:** `go build ./...` passes; manual smoke test of structure (no Device interface, no struct types in controller/devices files).
 
-**`controller/compile.go`** — dedicated compile goroutine:
-- `type Compiler struct{ project, editCounters*[8]atomic.Uint64, nextEvents*[8]atomic.Pointer[CompiledPattern], compileCh <-chan int, loopCounter atomic.Uint64 }`.
-- `Run(ctx)`: for each trackIdx received on compileCh: read track.mu (RLock), dispatch by Track.Type to the right `devices.X.Compile(...)` with a fresh seed (`time.Now().UnixNano() ^ trackIdx ^ loopCounter.Add(1)`), record the current editCounter on the resulting CompiledPattern, atomic-store into `nextEvents[trackIdx]`.
-- Log seed at DEBUG level for replay.
+**Dependencies:** Steps 1, 2, current 3a-e, 4 work outputs.
 
-**`controller/input.go`** — sole writer:
-- `type InputManager struct{ project, out, in, surface, focused, compileCh, editCounters*[8] }`.
-- `Run(ctx)` fans in pad events (from surface), MIDI input (per-track goroutines subscribing via `midi.Subscribe`), and `HandleKey` calls from View.
-- On any mutation to a track's spec/schedule: take track.mu.Lock, call `devices.<Kind>.HandleX(...)`, unlock, `editCounters[track].Add(1)`, `compileCh <- track`.
-- Schedule mutations (Queue) also trigger `compileCh <- track` (so `next_events` rebuilds with the queued pattern's spec).
-- Global hotkeys: `Space` calls `pe.Play()/Pause()`. `+/-` tempo. `S` save. Number keys focus. `,` Settings. `D` Save browser.
+### Step 4 — Restructure InputManager dispatch (M)
 
-**`controller/project.go`** — save/load + project browser helpers:
-- `SaveProject(p *model.Project, path string) error` — just `json.Marshal` + write.
-- `LoadProject(path string) (*model.Project, error)` — read, unmarshal, `Validate()`. Does NOT recompile anything (PlaybackEngine's next compile signal handles it).
-- `ListProjects/ListSaves/DeleteSave/RenameSave/DeleteProject/RenameProject` — used by `devices.Save`.
-- `NewProject(name) *model.Project`.
+Current InputManager dispatches via the Device interface (calling `device.HandlePad(...)` on the interface). Replace with type-switch dispatch:
 
-Write an end-to-end smoke test: construct `*model.Project` with one drum pattern (one active step), hook up a mock ToExternal + mock compileCh that just calls Drum.Compile synchronously, run `pe.Step(n)` (test-only), assert the expected event was emitted in the right tick range.
+```go
+func (im *InputManager) HandlePad(row, col int) {
+    switch im.focused.Kind {
+    case FocusTrack:
+        track := im.project.Tracks[im.focused.Track]
+        track.mu.Lock()
+        switch track.Type {
+        case model.DeviceDrum:       drumview.HandlePad(track.Drum, im.project, row, col)
+        case model.DevicePiano:      pianoview.HandlePad(track.Piano, im.project, row, col)
+        case model.DeviceMetropolix: metroview.HandlePad(track.Metropolix, im.project, row, col)
+        }
+        track.mu.Unlock()
+        im.editCounters[im.focused.Track].Add(1)
+        im.compileCh <- im.focused.Track
+    case FocusSave, FocusSession, FocusSettings:
+        // route to view/system/<kind>.HandlePad
+    }
+}
+```
 
-**Verify**: `go build ./... && go test ./controller/...`.
+Same for HandleKey, HandleMIDI.
 
-### Step 5 — Rewire `main.go` + `view/` on top of new controller (M)
+The Compiler goroutine similarly type-switches:
+```go
+switch track.Type {
+case model.DeviceDrum:       events = drum.Compile(track.Drum, seed)
+case model.DevicePiano:      events = piano.Compile(track.Piano, seed)
+case model.DeviceMetropolix: events = metropolix.Compile(track.Metropolix, seed)
+}
+```
 
-- `view/tui.go`: Bubbletea Model imports only `controller` + `theme`. Sends input to `InputManager.HandleKey`. Rendering via Manager accessors (`m.Focused()`, `m.RenderFocused()`) that take per-track RLock internally.
-- `view/widgets/`: carry over from current `widgets/`.
-- Rewrite `main.go` with the wiring:
+No interface anywhere. Clean type-switch dispatch.
+
+**Verify:** `go build ./...`; existing tests still pass.
+
+**Dependencies:** Step 3 restructure.
+
+### Step 5 — Wire main.go + view/ on top of restructured controller (M)
+
+- `view/tui.go`: Bubbletea Model. Routes input to InputManager. Calls per-domain Render/RenderLEDs based on focus. Calls `surface.SetLEDs`.
+- Rewrite `main.go`:
 ```go
 func main() {
     ctx := context.Background()
-    project := controller.LoadProject(...) or controller.NewProject("untitled")
-
+    project, err := system.LoadProject(...)  // or system.NewProject()
+    
     ports, _ := midi.NewPorts()
-    surface, _ := surface.OpenLaunchpad(ports)   // or surface.NewMock() with --no-hardware
-
+    surf, _ := surface.OpenLaunchpad(ports)
     compileCh := make(chan int, 16)
-
+    
     pe := controller.NewPlaybackEngine(project, ports, compileCh)
-    im := controller.NewInputManager(project, ports, ports, surface, compileCh, pe)
+    im := controller.NewInputManager(project, ports, ports, surf, compileCh, pe)
     compiler := controller.NewCompiler(project, pe.NextEvents(), pe.EditCounters(), compileCh)
-
+    
     go pe.Run(ctx)
     go im.Run(ctx)
     go compiler.Run(ctx)
-
-    // Initial compile trigger: one per track so next_events gets populated
+    
     for i := range project.Tracks { compileCh <- i }
-
-    p := tea.NewProgram(view.New(im, project, theme))
+    
+    p := tea.NewProgram(view.New(im, project))
     p.Run()
 }
 ```
 
-**Verify**: `go build ./...`, launch the app, edit a drum step, press play, confirm tick advances + event fires on expected tick.
+**Verify:** `go build ./...`. App launches. Edit a drum step. Press play. Tick advances; event fires.
+
+**Dependencies:** Steps 3, 4.
 
 ### Step 6 — Delete `sequencer/`, `tui/` (S)
 
-Remove old packages outright. `midi/` stays (we moved it there in Step 1). Keep `widgets/` (merged into `view/widgets/`), `theme/`, `palettes/`, `config/`, `debug/`, `cmd/miditest/`.
-
-`git rm -r sequencer/ tui/`.
-
-**Verify**: `go build ./... && go vet ./...`. `grep -r "sequencer" .` returns only docs / git history.
+Same as before. `git rm -r sequencer/ tui/`.
 
 ### Step 7 — Boundary tests (M)
 
-Consolidate tests at module boundaries:
-
-- `model/project_test.go`: JSON round-trip; Validate clamps (out-of-range fields snap to valid); length=0 guard.
-- `controller/devices/drum_test.go`: Compile empty → 0 events; Compile with one active step → 1 TimedEvent at right tick/velocity; HandlePad toggle mutates spec. Deterministic (same seed → same events).
-- `controller/devices/metropolix_test.go`: same-seed determinism; different-seed non-determinism (probability rolls); scale-quantized note at right tick.
-- `controller/playback_test.go`: MockSurface + mock ToExternal + injectable clock. Two-track project, drive `pe.Step(n)`, assert exact ordered sequence of `Send` calls. Schedule promotion test (Queue a pattern, wrap, verify it plays).
-- `controller/compile_test.go`: Send trackIdx on compileCh, verify `nextEvents[trackIdx]` gets populated with non-nil CompiledPattern. EditCounter matches.
-- `controller/input_test.go`: pad routing; MIDI input to recording-armed drum increments editCounter; focus changes.
-
-`controller/internal/testkit`: `NewTestProject()`, `NewMockPorts()`, `NewMockSurface()`, `NewFakeClock()`.
-
-**Verify**: `go test ./... -race` passes, nothing flaky.
+Tests at module boundaries:
+- `model/devices/drum_test.go`: state validation, JSON round-trip.
+- `controller/devices/drum_test.go`: `drum.Compile(...)` deterministic given seed; `drum.ToggleStep(...)` mutates correctly.
+- `view/devices/drum_test.go`: `drumview.Render(...)` produces expected string for a known state.
+- `controller/playback_test.go`: end-to-end with MockSurface + mock ToExternal + injectable clock.
+- `controller/compile_test.go`: send trackIdx → nextEvents populated.
+- `controller/input_test.go`: pad routing dispatches to right view function.
+- `controller/system/project_test.go`: Save → Load → DeepEqual.
 
 ---
 
-## Testing strategy
+## Risks & gotchas (revised)
 
-| Package | Boundary tests | Landed in step |
-|---|---|---|
-| `model/` | JSON round-trip, Validate clamps, length-0 guard | 1 (stubs) / 7 (finalize) |
-| `midi/` | Send records gomidi message via test seam; Subscribe demuxes by port+channel, drops oldest on overflow | 1 |
-| `controller/surface/` | MockSurface frame recording, pad event injector | 2 |
-| `controller/devices/*` | One Compile (deterministic given seed) + one HandlePad per device; probability tests for Metropolix | 3 |
-| `controller/playback.go` | End-to-end with MockToExternal, Step(n), assert event log; Schedule promotion; stale-reuse fallback | 4, 7 |
-| `controller/compile.go` | Send trackIdx → nextEvents populated + EditCounter correct | 4, 7 |
-| `controller/input.go` | Pad routing, MIDI recording, focus | 7 |
-| `controller/project.go` | Save→Load→DeepEqual; Load doesn't recompile (that's compile goroutine's job) | 4, 7 |
-| `view/` | Manual only | n/a |
-
----
-
-## Risks & gotchas
-
-1. **Schedule format is a breaking change.** Current `{StartTick, Patterns []int}` → `{Playing, Queued}`. Don't attempt auto-migration; `Validate()` rejecting old shape is fine.
-2. **PPQ=960 compile-time.** `const PPQ = 960` in `model/time.go`. Don't parameterize.
-3. **No runtime state in Model.** Transport/Tick moved to `controller/playback.go`. Input calls `pe.Play()`/`pe.Pause()`/`pe.SetTempo()`. Old design drew these on `Project` — that's wrong now.
-4. **Track device is a union.** `Track{Drum *Drum, Piano *Piano, Metropolix *Metropolix}` with "exactly one non-nil" rule enforced in `Validate()` given `Track.Type`. Zero-value Track (Type==None) is valid and skipped by tick/render.
-5. **CompiledPattern never persisted.** Lives only in `PlaybackEngine.currentEvents/nextEvents`. No JSON tags needed. Regenerated via compileCh signals.
-6. **EditCounter invariant.** InputManager MUST increment `editCounters[track]` after every mutation that affects generated events (spec edits, queue, MIDI recording). Compiler stamps the counter it saw into CompiledPattern. At wrap, playback compares: if current.EditCounter < editCounters[track].Load() AND next is nil → sync-compile; else reuse.
-7. **Compile must be pure.** `Compile(spec, seed)` — no side effects, no mutation of spec, no global state. Same inputs → same output. All randomness driven by seed.
-8. **Preview MIDI is direct.** `Drum.HandlePad` calls `out.Send(...)` directly when `state.Recording == false`. No channel, no goroutine, no Intent.
-9. **Slice-backing-array invariant.** When input mutates a pattern's spec, other readers (Compiler goroutine) might be reading the same Track's mu-protected state. Use per-track `sync.RWMutex` (Lock for writes, RLock for reads). When Compiler produces a new CompiledPattern, it always allocates a fresh `[]TimedEvent` — never mutates a slice that current_events might still point at.
-10. **Import cycle risk.** `devices.Save` needs to call `controller.SaveProject/LoadProject`. Mitigation: inject as callback parameter from InputManager. Cleaner than a `projectio` split.
-11. **Focus mutation.** `FocusTarget` mutated only by InputManager's own goroutine. No lock needed. View reads via `im.Focused() FocusTarget` (value copy).
-12. **Kits.** `Track.Kit` is "" for new tracks; `GetKit` defaults to GM. Kit note translation in `devices.Drum.Compile` — TimedEvents carry pre-resolved MIDI notes. Eliminates the odd `Note < 16` branch in today's midi output loop.
-13. **NoteInput port.** Today's `State.NoteInputPort` single string → gone. MIDI in is per-track via `Track.PortName + Track.Channel` per DESIGN 4.7. Settings device configures each track.
-14. **Seed quality.** Use xorshift64 (`controller/devices/rng.go`), not `math/rand`. Seed via `time.Now().UnixNano() ^ trackIdx ^ loopCounter`. Log seeds at DEBUG for reproducing accidents.
-15. **RtMidi C++ warnings.** Pre-existing, ignore.
+1. **Schedule format breaking change** (handled in earlier work).
+2. **PPQ=960 compile-time const.** In `model/project.go`.
+3. **No runtime state in Model.** Transport/Tick own by PlaybackEngine.
+4. **No Device interface, no smushed device structs.** This is the big one. If you find yourself writing `func (d Drum) Compile(...)` — stop. It should be a free function `func Compile(state *Drum, ...)` in the right layer.
+5. **Conceptual entities have parallel paths across layers.** "drum device" lives at `model/devices/drum.go`, `controller/devices/drum.go`, `view/devices/drum.go`. Don't put drum stuff anywhere else.
+6. **Functions are universally callable.** `controller/system/project.SaveProject` can be called from main, InputManager, view/system/project, tests, anywhere. Organization is for navigability, not access control.
+7. **Subdirs (`devices/`, `system/`) are organizational, not semantic.** They group related files for findability. They don't define a category that means anything beyond "these files belong together by domain vibe."
+8. **CompiledPattern lives only in PlaybackEngine.** Never in Model.
+9. **EditCounter invariant.** InputManager (and its callees in view/controller layers that mutate state) must increment after every state change. Compiler stamps the counter on each CompiledPattern.
+10. **Compile must be pure.** `drum.Compile(spec, seed)` — no side effects, no global state.
+11. **Preview MIDI is direct.** `midi.Send(...)` from view's HandlePad — no controller call needed.
+12. **Per-track RWMutex** on each device state. View takes RLock for rendering; controller mutators take Lock.
+13. **Import discipline.** `controller/devices/drum` imports `model/devices` (for Drum state type) but NOT `view/`. `view/devices/drum` imports both `model/devices` (state type) and `controller/devices/drum` (mutator functions). View never has functions that controller imports.
+14. **Seed quality.** xorshift64, not `math/rand`. Seed `= time ^ trackIdx ^ loopCounter`. Log seeds.
 
 ---
 
 ## Open questions
 
-These are the ones still unresolved after the Grok design review:
-
-1. **`controller/devices/save.go` → `controller.SaveProject` import cycle.** Solution proposed: inject `saveProject func(*model.Project, string) error` as a construction parameter. Needs a concrete decision during Step 3.
-2. **MockSurface.PushPad ergonomics**: synchronous (no-buffer, blocks until consumed) or buffered? Lean synchronous for test determinism.
-3. **Settings → reconnect MIDI port.** Settings changes `Track.PortName/Channel`; existing per-track MIDI subscription goroutine needs to restart on change. `midi.Ports` needs `Resubscribe(port, channel)` or the input manager needs a "restart my per-track subscriber" signal.
-4. **Quick-save target when `ProjectName == ""`**: save to `"untitled"` as today's behavior, or prompt? Low-priority UX call.
-5. **Keep `cmd/miditest/`?** Assume yes as a dev utility.
-6. **Per-track compile goroutines vs. one shared.** Plan uses one shared goroutine draining `compileCh`. If profiling shows compile-rate burstiness is a problem, upgrade to a worker pool. Defer unless we see it.
+1. **Package naming under subdirs.** Does `controller/devices/drum.go` go in `package drum` (one package per domain), or `package devices` (with multiple files)? Trade-off: `package drum` gives short call sites (`drum.Compile`); `package devices` gives one package with shared types. Lean `package drum` per domain — clearer call sites and avoids name collisions when both `controller/devices/drum.go` and `view/devices/drum.go` need different names.
+2. **MockSurface.PushPad** synchronous vs buffered.
+3. **Settings → resubscribe MIDI port.** Settings now lives in `controller/system/settings.go` + `view/system/settings.go`. The function `settings.ApplyPortChange(track, port, chan)` could either signal InputManager directly or mutate state with a version counter that InputManager watches. Decide during impl.
 
 ---
 
 ## Time estimate
 
-Solo evenings/weekends: **1.5–2.5 weeks**. Tight but realistic.
+Restructuring of existing work: **~1 day**. The shape change is real but most of the LOGIC committed in Steps 3 and 4 survives — it just gets relocated and the wrapping Go types disappear. Drum's Compile body, Drum's HandlePad body, Drum's Render body all move to their respective files unchanged.
 
-Breakdown:
-- Step 1: half a day (type moves + midi/ re-home, mechanical)
-- Step 2: couple hours (surface interface + Launchpad port + Mock)
-- Step 3: ~2 days (porting device logic to pure compilers + seed plumbing; Metropolix is the longest)
-- Step 4: ~1 day (playback + compile goroutine + input; new code)
-- Step 5: half a day (main.go wiring + view)
-- Step 6: minutes (git rm)
-- Step 7: 1 day (tests against clean boundaries)
+Then Steps 5-7 as planned: ~2 days for view + main.go wiring + tests.
 
-The novel engineering is concentrated in Step 4 (double-buffer wiring, editCounter invariant, compile goroutine). Step 3 is largely mechanical simplification (devices get ~40% smaller as queue/dirty/callback plumbing evaporates). Steps 1, 2, 5, 6 are routine.
+Total remaining: **~3 days** of evening work to ship a runnable app.
