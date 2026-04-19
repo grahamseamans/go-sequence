@@ -115,7 +115,7 @@ No compilation. No regeneration. Pure walk + dispatch.
 ```
 pad press → surface → InputManager.HandlePad(row, col)
   → InputManager acquires state.mu.Lock()           // writer owns the lock
-  → InputManager calls focused device: devices.Drum.HandlePad(state, project, ports, row, col)
+  → InputManager calls focused device: devices.Drum.HandlePad(state, project, out, row, col)
     → device mutates state.Patterns[N].Human (e.g., Notes[lane].Steps[step].Active = true)
     → device recompiles: state.Patterns[N].Machine = devices.Drum.Compile(&state.Patterns[N].Human)
     → return                                        // device never touches the lock
@@ -133,7 +133,7 @@ key press → InputManager.HandleKey(key)
   → InputManager recognizes "space" as play/pause → toggles state.Transport.Playing
   → return
 
-pad press in Session view → Session.HandlePad(state, project, ports, row, col)
+pad press in Session view → Session.HandlePad(state, project, out, row, col)
   → device mutates state.Tracks[row].Drum.Schedule.Queued = col
   → LED render next frame: pattern-col pad flashes (reads Schedule.Queued)
   → return
@@ -144,13 +144,13 @@ No compile called. PlaybackEngine reads `Schedule.Queued` and promotes it to `Sc
 ### 4.4 Preview MIDI (no state, no compile)
 
 ```
-pad press in Drum view, not recording → Drum.HandlePad(state, project, ports, row, col)
+pad press in Drum view, not recording → Drum.HandlePad(state, project, out, row, col)
   → device checks state.Drum.Recording == false
-  → device calls ports.Send(track.PortName, track.Channel, midi.Event{note, vel})
+  → device calls out.Send(track.PortName, track.Channel, midi.Event{note, vel})
   → return
 ```
 
-Direct send. Input handlers have access to `*midi.Ports` the same way the manager does. No state change, no intent machinery.
+Direct send. Input handlers take `midi.ToExternal` as a parameter — they can send MIDI out but cannot subscribe. No state change, no intent machinery.
 
 ### 4.5 Save / Load
 
@@ -174,6 +174,99 @@ load:
 ```
 
 Save/load lives in `controller/project.go`, not in `model/`. Model is pure data. **Loading always stops playback** — no mid-play load.
+
+### 4.6 Clock
+
+Internal wall-clock timer drives playback. PPQ = 960 (compile-time constant; ~0.5ms resolution at 120 BPM).
+
+```
+tick interval (ns) = 60e9 / (Tempo * PPQ)
+
+on play:
+    state.Transport.Playing = true
+    state.Transport.T0      = time.Now()
+    state.Tick              = 0          // reset on each play (simpler than resume)
+
+on pause:
+    state.Transport.Playing = false
+    (Tick is preserved; next play starts fresh at 0)
+
+on tempo change during play:
+    re-anchor: T0 = time.Now() - (Tick * newInterval)
+    subsequent ticks use the new interval; no tick jump
+
+tick loop (goroutine):
+    for state.Transport.Playing:
+        sleep until next expected tick boundary
+        globalTick = int64((time.Now() - T0) / interval)
+        if globalTick > state.Tick:
+            PlaybackEngine.tick(globalTick)          // handles delta ≥ 1
+            state.Tick = globalTick
+```
+
+Back-pressure: if dispatch lags, one tick loop call can process delta > 1 ticks in its for-each-event scan — no tick drop. If this ever becomes unsustainable (CPU saturation), we'd add a rate limit; not a concern for 8 tracks × ~16 events per pattern at typical tempos.
+
+Future: MIDI clock slave mode. Same tick loop, external `globalTick` source instead of internal timer. No other changes.
+
+### 4.7 MIDI input routing
+
+All routing logic lives in `controller/midi/`. InputManager is a thin consumer:
+
+```
+// midi package exposes via FromExternal interface:
+in.Subscribe(portName, channel uint8) → <-chan Event
+    // returns events matching both filters
+    // buffer = 64; overflow drops oldest (real-time MIDI: stale > lost)
+    // multiple subscribers for the same (port, channel) each get a copy
+
+InputManager on startup:
+    for each track:
+        go func(trackIdx int):
+            ch, _ := im.in.Subscribe(track.PortName, track.Channel)
+            for event := range ch:
+                im.state.mu.Lock()
+                devices.<Kind>.HandleMIDI(trackState, im.out, event)
+                im.state.mu.Unlock()
+```
+
+InputManager has no awareness of port/channel matching, buffering strategy, or flood handling — the midi package owns all of that. If the same (port, channel) is used by multiple tracks, each track's subscription gets the event independently.
+
+### 4.8 Focus
+
+```
+type FocusTarget struct {
+    Kind  FocusKind   // Track, Settings, Save, Session
+    Track int         // valid when Kind == Track
+}
+```
+
+Mutated only by InputManager itself (single-goroutine write), so no lock needed. Read by View under its own RLock-style snapshot (atomic read of the pointer would also work — FocusTarget is small enough to copy by value).
+
+Changes triggered by:
+- Number keys 1-8 → `Kind=Track, Track=idx`
+- `,` → `Kind=Settings`
+- `s` → `Kind=Save`
+- tab through session → `Kind=Session`
+
+Session pad taps do NOT change focus by default — they just mutate `Schedule.Queued` on the tapped track. Hardware clip-launcher convention.
+
+### 4.9 View rendering
+
+View runs its own goroutine at ~60Hz:
+
+```
+for each frame (~16ms):
+    focused := InputManager.Focused()            // small value copy
+    track   := state.Tracks[focused.Track]
+    track.<Kind>.mu.RLock()
+    tuiStr  := devices.<Kind>.Render(deviceState, project)
+    leds    := devices.<Kind>.RenderLEDs(deviceState, project)
+    track.<Kind>.mu.RUnlock()
+    render tuiStr to terminal
+    surface.SetLEDs(leds)
+```
+
+RLock contention: tick goroutine takes RLock briefly each tick (microseconds); view takes RLock at 60Hz. Readers don't block each other. Writer (input edits) briefly blocks both, which is fine — edits are bursty and sub-ms.
 
 ---
 
@@ -246,7 +339,7 @@ type TimedEvent struct {
 func (p *Project) Validate()  // clamps all fields recursively
 ```
 
-Piano and Metropolix follow the same shape (Human + Machine per pattern, atomic.Pointer per pattern array).
+Piano and Metropolix follow the same shape (Human + Machine per pattern, per-track RWMutex on the device state).
 
 ### 5.2 view/
 
@@ -262,19 +355,19 @@ package controller
 type PlaybackEngine struct {
     project *model.Project
     cursors [8]Cursor
-    ports   *midi.Ports
+    out     midi.ToExternal       // only sends; cannot subscribe
 }
 
 type Cursor struct {
     Tick int64   // playback position within the currently-playing pattern
 }
 
-func NewPlaybackEngine(project *model.Project, ports *midi.Ports) *PlaybackEngine
+func NewPlaybackEngine(project *model.Project, out midi.ToExternal) *PlaybackEngine
 func (pe *PlaybackEngine) Run(ctx context.Context)             // owns the clock + tick goroutine
 func (pe *PlaybackEngine) ResetCursors()                        // called after project swap
 ```
 
-Single goroutine: reads `project` state atomically, walks events, dispatches MIDI via `ports`. Writes only its own cursors + `Project.Tick`.
+Single goroutine: reads `project` state under per-track RLock (briefly), walks events without lock, dispatches MIDI via `out`. Writes only its own cursors + `Project.Tick` (atomic), plus brief Lock for Schedule boundary promotion.
 
 #### controller/input.go
 
@@ -283,7 +376,8 @@ package controller
 
 type InputManager struct {
     project *model.Project
-    ports   *midi.Ports       // for preview MIDI in input handlers
+    out     midi.ToExternal        // for preview MIDI
+    in      midi.FromExternal      // for incoming MIDI events
     surface surface.Surface
     focused FocusTarget
 }
@@ -293,8 +387,8 @@ type FocusTarget struct {
     Track int         // valid when Kind == Track
 }
 
-func NewInputManager(project *model.Project, ports *midi.Ports, surface surface.Surface) *InputManager
-func (im *InputManager) Run(ctx context.Context)                // listens to surface.PadEvents()
+func NewInputManager(project *model.Project, out midi.ToExternal, in midi.FromExternal, surface surface.Surface) *InputManager
+func (im *InputManager) Run(ctx context.Context)                // listens to surface.PadEvents() + MIDI in subscriptions
 func (im *InputManager) HandleKey(key string)                   // called by view
 func (im *InputManager) HandlePad(row, col int)                 // also callable directly (tests)
 ```
@@ -323,9 +417,10 @@ type Drum struct{}
 func (Drum) Compile(human *model.DrumHuman) *model.MachinePattern
 
 // input handlers — mutate state directly; recompile by calling own Compile
-func (Drum) HandlePad(state *model.Drum, project *model.Project, ports *midi.Ports, row, col int)
-func (Drum) HandleKey(state *model.Drum, project *model.Project, ports *midi.Ports, key string)
-func (Drum) HandleMIDI(state *model.Drum, ports *midi.Ports, ev midi.Event)
+// caller (InputManager) holds the per-track Lock; devices never touch locks
+func (Drum) HandlePad(state *model.Drum, project *model.Project, out midi.ToExternal, row, col int)
+func (Drum) HandleKey(state *model.Drum, project *model.Project, out midi.ToExternal, key string)
+func (Drum) HandleMIDI(state *model.Drum, out midi.ToExternal, ev midi.Event)
 
 // view helpers
 func (Drum) Render(state *model.Drum, project *model.Project) string
@@ -347,12 +442,26 @@ type Event struct {
     // ...
 }
 
-type Ports struct { ... }
+// Small interfaces — principle of least privilege. Each engine takes only what it needs.
+
+type ToExternal interface {
+    Send(portName string, channel uint8, ev Event) error
+}
+
+type FromExternal interface {
+    // Subscribe returns a channel of events matching both filters.
+    // Buffer: 64 events; overflow drops oldest.
+    // Multiple subscribers for the same (port, channel) each get an independent copy.
+    Subscribe(portName string, channel uint8) (<-chan Event, error)
+}
+
+type Ports struct { ... }  // implements both ToExternal and FromExternal
 
 func NewPorts() (*Ports, error)
 func (p *Ports) Send(portName string, channel uint8, ev Event) error
-func (p *Ports) Subscribe(portName string) (<-chan Event, error)
+func (p *Ports) Subscribe(portName string, channel uint8) (<-chan Event, error)
 func (p *Ports) List() []PortInfo
+func (p *Ports) Close() error
 ```
 
 #### controller/surface/
@@ -388,8 +497,8 @@ Goroutines share `*model.Project`:
 
 | Goroutine                       | Reads                                      | Writes                                           |
 |---------------------------------|--------------------------------------------|--------------------------------------------------|
-| PlaybackEngine.Run              | pattern.Machine (atomic), Schedule, Tracks, Transport | cursors (own), Project.Tick, Schedule.Playing/Queued at boundary |
-| InputManager.Run                | surface pad events                         | patterns (atomic swap via device Compile), spec, Schedule.Queued, transport |
+| PlaybackEngine.Run              | pattern.Machine.Events (under RLock), Schedule, Tracks, Transport | cursors (own), Project.Tick, Schedule.Playing/Queued at boundary (under Lock) |
+| InputManager.Run                | surface pad events                         | patterns (under Lock via device Compile), spec, Schedule.Queued, transport |
 | InputManager.HandleKey (view)   | everything                                 | same as InputManager.Run                         |
 
 - **Per-track `sync.RWMutex`** on each device state (Drum, Piano, Metropolix). Guards Patterns (both Human and Machine.Events) and Schedule. **All Lock/Unlock calls are made by InputManager (writer side) or PlaybackEngine (boundary promotion only).** Devices themselves are lock-unaware.
@@ -411,7 +520,27 @@ Goroutines share `*model.Project`:
 
 ---
 
-## 8. Out of scope (future work)
+## 8. Validation and edge cases
+
+`Project.Validate()` runs after Load. Clamps and enforces:
+
+- `Tempo` ∈ [20, 300]
+- Per-track `Schedule.Playing` ∈ [0, NumPatterns-1]
+- Per-track `Schedule.Queued` ∈ [-1, NumPatterns-1]  (−1 means nothing queued)
+- Pattern lengths ≥ 1 (prevents divide-by-zero in tick modular math)
+- `Track.Type` must match exactly one non-nil device field (`Drum`/`Piano`/`Metropolix`)
+- Drum/Piano/Metropolix-specific field ranges (pitch 0-127, velocity 0-127, probability 0-100, etc.)
+
+Edge cases handled by design, not special-case code:
+
+- **Tempo = 0** — tick interval becomes infinite, no ticks advance. Equivalent to paused. Valid internal state; UI prevents setting tempo below 20 via `Validate()`.
+- **Pattern length = 0** — clamped to 1 in `Validate()` and by a defensive `max(plen, 1)` at tick time.
+- **Probability = 0 / 100** — never fires / always fires. Boundary cases of the rollProbability function.
+- **Queue during promotion** — mutex serializes. Whichever write gets the lock first runs; user's queue always honored on the next boundary.
+- **Pattern length change mid-play** — cursor modular-wraps via `cursor.Tick %= plen` at next tick. No special handler.
+- **Track has no device type** — `Track.Type == None` → skip in tick loop, skip in render.
+
+## 9. Out of scope (future work)
 
 - **Named pattern chains** ("meta-patterns") — reusable sequences of patterns that queue as a single unit (e.g., "Chorus" = [D, E, F]). Schedule extends cleanly to reference either a pattern or a chain via a small kind enum. Deferred to v2.
 - Multi-controller support (`Surface` interface admits this).
