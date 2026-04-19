@@ -446,9 +446,13 @@ func (m *Manager) SetMIDIInput(ctrl midi.Controller) {
 	}()
 }
 
-// fillQueues fills all device queues up to horizon
+// fillQueues fills all device queues up to horizon (only when playing)
 func (m *Manager) fillQueues() {
 	m.mu.Lock()
+	if !S.Playing {
+		m.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	currentTick := S.TimeToTick(now)
 	targetTick := currentTick + lookAheadTicks

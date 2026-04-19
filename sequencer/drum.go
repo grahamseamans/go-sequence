@@ -82,6 +82,9 @@ func (d *DrumDevice) GeneratePattern(patternNum int, startTick int64) []midi.Eve
 		// Check all 16 notes at this step
 		for noteIdx := 0; noteIdx < 16; noteIdx++ {
 			note := &pat.Notes[noteIdx]
+			if note.Length <= 0 {
+				continue // skip invalid/corrupt lane (e.g. loaded JSON default)
+			}
 			// Each note loops at its own length (polymeters)
 			noteStep := step % note.Length
 			s := &note.Steps[noteStep]

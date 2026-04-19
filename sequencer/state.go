@@ -379,6 +379,24 @@ func (s *MetropolixState) ResetAccumulators() {
 }
 
 // Validate clamps all fields to valid ranges (call after load)
+func (s *DrumState) Validate() {
+	s.PlayingPatternIdx = clamp(s.PlayingPatternIdx, 0, NumPatterns-1)
+	s.EditingPatternIdx = clamp(s.EditingPatternIdx, 0, NumPatterns-1)
+	s.SelectedNoteIdx = clamp(s.SelectedNoteIdx, 0, 15)
+	for i := range s.Patterns {
+		for n := range s.Patterns[i].Notes {
+			s.Patterns[i].Notes[n].Length = clamp(s.Patterns[i].Notes[n].Length, 1, 32)
+		}
+	}
+	// Cursor must be within selected note length
+	if s.EditingPatternIdx >= 0 && s.EditingPatternIdx < NumPatterns && s.SelectedNoteIdx >= 0 && s.SelectedNoteIdx < 16 {
+		pat := &s.Patterns[s.EditingPatternIdx]
+		noteLen := pat.Notes[s.SelectedNoteIdx].Length
+		s.Cursor = clamp(s.Cursor, 0, noteLen-1)
+	}
+}
+
+// Validate clamps all fields to valid ranges (call after load)
 func (s *MetropolixState) Validate() {
 	// Clamp top-level state
 	s.Editing = clamp(s.Editing, 0, NumPatterns-1)

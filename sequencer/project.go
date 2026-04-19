@@ -194,6 +194,7 @@ func LoadProject(projectName, filename string) error {
 	S.Tick = 0
 	for _, track := range S.Tracks {
 		if track.Drum != nil {
+			track.Drum.Validate()
 			track.Drum.Step = 0
 			track.Drum.Recording = false
 			track.Drum.Preview = false

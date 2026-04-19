@@ -47,14 +47,14 @@ var modeNames = []string{"Forward", "Reverse", "Pendulum", "Random"}
 
 // Launchpad pages
 const (
-	PageAccumulator  = 0 // Has sub-pages: value, reset, mode
-	PageProbability  = 1
-	PageGate         = 2 // Gate length (rows 7-2), gate on/off (row 1), slide (row 0)
-	PageRatchets     = 3
-	PagePulseCount   = 4
-	PageNotes        = 5
-	PageOctave       = 6
-	PageSettings     = 7
+	PageAccumulator = 0 // Has sub-pages: value, reset, mode
+	PageProbability = 1
+	PageGate        = 2 // Gate length (rows 7-2), gate on/off (row 1), slide (row 0)
+	PageRatchets    = 3
+	PagePulseCount  = 4
+	PageNotes       = 5
+	PageOctave      = 6
+	PageSettings    = 7
 )
 
 // Accumulator sub-pages (navigated with up/down arrows)
@@ -66,7 +66,7 @@ const (
 
 // Gate length values (as fraction of pulse)
 var gateLengthValues = []float64{
-	0.0,   // Trigger (immediate off)
+	0.0,    // Trigger (immediate off)
 	0.0625, // 1/16
 	0.125,  // 1/8
 	0.25,   // 1/4
@@ -76,19 +76,25 @@ var gateLengthValues = []float64{
 
 var pageNames = []string{"Accum", "Prob", "Gate", "Ratchets", "Pulse", "Notes", "Octave", "Settings"}
 
+// MetropolixSchedule tracks what patterns play at what ticks (source of truth for playback)
+type MetropolixSchedule struct {
+	StartTick int64
+	Patterns  []int
+}
+
 // MetropolixDevice is a Metropolix-style melodic sequencer
 type MetropolixDevice struct {
 	state *MetropolixState
 
-	// Queue-based playback - protected by queueMu (held ONLY during swap, not generation)
-	queueMu          sync.RWMutex
-	queue            []midi.Event // events sorted by tick
-	queuedUntilTick  int64        // how far we've filled the queue
-	patternStartTick int64        // tick when current pattern started
-	onQueueChange    func()       // callback to wake manager when queue needs recalc
+	// Schedule - source of truth for what plays when
+	schedule     MetropolixSchedule
+	patternDirty [NumPatterns]bool
 
-	// Pattern switching
-	nextPatternTick int64 // tick when next pattern should start (-1 if none)
+	// Queue - derived from schedule + pattern data
+	queueMu          sync.RWMutex
+	queue            []midi.Event
+	patternStartTick int64
+	onQueueChange    func() // callback to wake manager when queue needs recalc
 
 	// Confirmation dialog
 	confirmMode   bool
@@ -99,8 +105,11 @@ type MetropolixDevice struct {
 // NewMetropolixDevice creates a device that operates on the given state
 func NewMetropolixDevice(state *MetropolixState) *MetropolixDevice {
 	return &MetropolixDevice{
-		state:           state,
-		nextPatternTick: -1,
+		state: state,
+		schedule: MetropolixSchedule{
+			StartTick: 0,
+			Patterns:  []int{0},
+		},
 	}
 }
 
@@ -229,47 +238,115 @@ func (d *MetropolixDevice) GeneratePattern(patternNum int, startTick int64) []mi
 	return events
 }
 
+// --- Schedule helpers ---
+
+func (d *MetropolixDevice) scheduleEndTick() int64 {
+	tick := d.schedule.StartTick
+	for _, patIdx := range d.schedule.Patterns {
+		tick += d.fauxPatternTicks(patIdx)
+	}
+	return tick
+}
+
+func (d *MetropolixDevice) extendSchedule(targetTick int64) {
+	for d.scheduleEndTick() < targetTick {
+		lastPat := 0
+		if len(d.schedule.Patterns) > 0 {
+			lastPat = d.schedule.Patterns[len(d.schedule.Patterns)-1]
+		}
+		d.schedule.Patterns = append(d.schedule.Patterns, lastPat)
+	}
+}
+
+func (d *MetropolixDevice) trimSchedule(currentTick int64) {
+	for len(d.schedule.Patterns) > 1 {
+		firstPatLen := d.fauxPatternTicks(d.schedule.Patterns[0])
+		if d.schedule.StartTick+firstPatLen <= currentTick {
+			d.schedule.StartTick += firstPatLen
+			d.schedule.Patterns = d.schedule.Patterns[1:]
+		} else {
+			break
+		}
+	}
+}
+
+func (d *MetropolixDevice) scheduleContainsDirty() bool {
+	for _, patIdx := range d.schedule.Patterns {
+		if d.patternDirty[patIdx] {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *MetropolixDevice) clearDirtyFlags() {
+	for i := range d.patternDirty {
+		d.patternDirty[i] = false
+	}
+}
+
+func (d *MetropolixDevice) queueEndTick() int64 {
+	d.queueMu.RLock()
+	defer d.queueMu.RUnlock()
+	if len(d.queue) == 0 {
+		return d.schedule.StartTick
+	}
+	return d.queue[len(d.queue)-1].Tick
+}
+
+// syncQueueToSchedule regenerates the queue from the schedule
+func (d *MetropolixDevice) syncQueueToSchedule() {
+	if !d.scheduleContainsDirty() {
+		return
+	}
+
+	d.state.ResetAccumulators()
+	var newQueue []midi.Event
+	tick := d.schedule.StartTick
+	for _, patIdx := range d.schedule.Patterns {
+		events := d.GeneratePattern(patIdx, tick)
+		newQueue = append(newQueue, events...)
+		tick += d.fauxPatternTicks(patIdx)
+	}
+
+	if len(d.schedule.Patterns) > 0 {
+		d.state.Pattern = d.schedule.Patterns[0]
+	}
+	d.patternStartTick = d.schedule.StartTick
+
+	d.queueMu.Lock()
+	d.queue = newQueue
+	d.queueMu.Unlock()
+
+	d.clearDirtyFlags()
+	if d.onQueueChange != nil {
+		d.onQueueChange()
+	}
+}
+
+func (d *MetropolixDevice) markDirtyAndSync() {
+	d.patternDirty[d.state.Editing] = true
+	if d.onQueueChange != nil {
+		d.onQueueChange()
+	}
+}
+
 // Device interface implementation - queue-based
 
 // FillUntil fills the event queue with events up to the given tick
 func (d *MetropolixDevice) FillUntil(tick int64) {
-	// Read current state
-	d.queueMu.RLock()
-	queuedUntil := d.queuedUntilTick
-	patternStart := d.patternStartTick
-	nextPatTick := d.nextPatternTick
-	d.queueMu.RUnlock()
+	d.trimSchedule(S.Tick)
+	d.extendSchedule(tick)
 
-	if queuedUntil >= tick {
-		return // already filled
+	if d.scheduleContainsDirty() {
+		d.syncQueueToSchedule()
 	}
-
-	// Generate events OUTSIDE the lock
-	var newEvents []midi.Event
-	currentPattern := d.state.Pattern
-	for queuedUntil < tick {
-		// Check for pattern switch at boundary
-		if nextPatTick >= 0 && queuedUntil >= nextPatTick {
-			d.state.Pattern = d.state.Next
-			d.state.Next = -1
-			currentPattern = d.state.Pattern
-			patternStart = nextPatTick
-			nextPatTick = -1
-			d.state.ResetAccumulators()
+	if len(d.queue) == 0 || d.queueEndTick() < tick {
+		for _, patIdx := range d.schedule.Patterns {
+			d.patternDirty[patIdx] = true
 		}
-
-		events := d.GeneratePattern(currentPattern, queuedUntil)
-		newEvents = append(newEvents, events...)
-		queuedUntil += d.fauxPatternTicks(currentPattern)
+		d.syncQueueToSchedule()
 	}
-
-	// Swap in new events (brief lock)
-	d.queueMu.Lock()
-	d.queue = append(d.queue, newEvents...)
-	d.queuedUntilTick = queuedUntil
-	d.patternStartTick = patternStart
-	d.nextPatternTick = nextPatTick
-	d.queueMu.Unlock()
 }
 
 // PeekNextEvent returns the next event without removing it
@@ -299,12 +376,13 @@ func (d *MetropolixDevice) PopNextEvent() *midi.Event {
 // ClearQueue clears all queued events (for stop/restart)
 func (d *MetropolixDevice) ClearQueue() {
 	d.queueMu.Lock()
-	defer d.queueMu.Unlock()
-
 	d.queue = nil
-	d.queuedUntilTick = 0
+	d.queueMu.Unlock()
+
+	d.schedule.StartTick = 0
+	d.schedule.Patterns = []int{d.state.Pattern}
 	d.patternStartTick = 0
-	d.nextPatternTick = -1
+	d.clearDirtyFlags()
 	d.state.ResetPlayback()
 }
 
@@ -413,100 +491,39 @@ func (d *MetropolixDevice) applyAccumulator(stageIdx int) {
 	s.Accum[stageIdx] += stage.Accumulator * s.AccumDir[stageIdx]
 }
 
-// QueuePattern queues a pattern change at the next faux boundary after atTick
+// QueuePattern queues a pattern change at the next boundary after atTick
 func (d *MetropolixDevice) QueuePattern(p int, atTick int64) {
 	if p < 0 || p >= NumPatterns {
 		return
 	}
 	d.state.Next = p
 
-	// Use faux pattern length for musical switching
-	patternTicks := d.fauxPatternTicks(d.state.Pattern)
+	d.extendSchedule(atTick)
 
-	// Read state under lock
-	d.queueMu.RLock()
-	patternStart := d.patternStartTick
-	queuedUntil := d.queuedUntilTick
-	d.queueMu.RUnlock()
-
-	// Calculate when the next pattern boundary occurs
-	ticksSinceStart := atTick - patternStart
-	ticksIntoPattern := ticksSinceStart % patternTicks
-	ticksToNextBoundary := patternTicks - ticksIntoPattern
-	boundaryTick := atTick + ticksToNextBoundary
-
-	needsNotify := false
-
-	// If we've already queued past the boundary, wipe those events
-	if queuedUntil > boundaryTick {
-		d.queueMu.Lock()
-		newQueue := d.queue[:0]
-		for _, e := range d.queue {
-			if e.Tick < boundaryTick {
-				newQueue = append(newQueue, e)
+	tick := d.schedule.StartTick
+	foundSlot := false
+	for i, patIdx := range d.schedule.Patterns {
+		patLen := d.fauxPatternTicks(patIdx)
+		if tick+patLen > atTick {
+			nextSlot := i + 1
+			if nextSlot < len(d.schedule.Patterns) {
+				for j := nextSlot; j < len(d.schedule.Patterns); j++ {
+					d.schedule.Patterns[j] = p
+				}
+			} else {
+				d.schedule.Patterns = append(d.schedule.Patterns, p)
 			}
+			foundSlot = true
+			break
 		}
-		d.queue = newQueue
-		d.queuedUntilTick = boundaryTick
-		d.nextPatternTick = boundaryTick
-		d.queueMu.Unlock()
-		needsNotify = true
-	} else {
-		d.queueMu.Lock()
-		d.nextPatternTick = boundaryTick
-		d.queueMu.Unlock()
+		tick += patLen
+	}
+	if !foundSlot {
+		d.schedule.Patterns = append(d.schedule.Patterns, p)
 	}
 
-	// Wake manager outside the lock
-	if needsNotify && d.onQueueChange != nil {
-		d.onQueueChange()
-	}
-}
-
-// regeneratePatternInQueue replaces events for the current pattern in queue.
-// Called from UI thread - generates events WITHOUT holding lock, then swaps.
-func (d *MetropolixDevice) regeneratePatternInQueue(patternNum int) {
-	if patternNum != d.state.Pattern {
-		return
-	}
-
-	patternTicks := d.fauxPatternTicks(patternNum)
-
-	// --- Read current state (brief lock) ---
-	d.queueMu.RLock()
-	oldQueue := d.queue
-	oldQueuedUntil := d.queuedUntilTick
-	patternStart := d.patternStartTick
-	d.queueMu.RUnlock()
-
-	// --- Generate new queue OUTSIDE the lock (this is the slow part) ---
-	var newQueue []midi.Event
-
-	// Keep events before current pattern start
-	for _, e := range oldQueue {
-		if e.Tick < patternStart {
-			newQueue = append(newQueue, e)
-		}
-	}
-
-	// Regenerate from pattern start to where we had queued
-	newQueuedUntil := patternStart
-	for newQueuedUntil < oldQueuedUntil {
-		events := d.GeneratePattern(d.state.Pattern, newQueuedUntil)
-		newQueue = append(newQueue, events...)
-		newQueuedUntil += patternTicks
-	}
-
-	// --- Swap in new queue (brief lock) ---
-	d.queueMu.Lock()
-	d.queue = newQueue
-	d.queuedUntilTick = newQueuedUntil
-	d.queueMu.Unlock()
-
-	// --- Wake dispatch loop to recalculate next event ---
-	if d.onQueueChange != nil {
-		d.onQueueChange()
-	}
+	d.patternDirty[p] = true
+	d.syncQueueToSchedule()
 }
 
 // CurrentPattern returns the currently playing pattern
@@ -516,8 +533,8 @@ func (d *MetropolixDevice) CurrentPattern() int {
 
 // NextPattern returns the queued pattern (-1 if none)
 func (d *MetropolixDevice) NextPattern() int {
-	if d.nextPatternTick >= 0 {
-		return d.state.Next
+	if len(d.schedule.Patterns) > 1 && d.schedule.Patterns[1] != d.schedule.Patterns[0] {
+		return d.schedule.Patterns[1]
 	}
 	return -1
 }
@@ -543,9 +560,9 @@ func (d *MetropolixDevice) HandleMIDI(event midi.Event) {
 	// Could record incoming notes to stages
 }
 
-func (d *MetropolixDevice) ToggleRecording() {}
-func (d *MetropolixDevice) TogglePreview()   {}
-func (d *MetropolixDevice) IsRecording() bool { return false }
+func (d *MetropolixDevice) ToggleRecording()   {}
+func (d *MetropolixDevice) TogglePreview()     {}
+func (d *MetropolixDevice) IsRecording() bool  { return false }
 func (d *MetropolixDevice) IsPreviewing() bool { return false }
 
 func (d *MetropolixDevice) View() string {
@@ -1099,37 +1116,47 @@ func (d *MetropolixDevice) HandleKey(key string) {
 		// Lower pitch
 		if stage.Note > 0 {
 			stage.Note--
+			d.markDirtyAndSync()
 		} else if stage.Octave > 0 {
 			stage.Octave--
 			stage.Note = 7
+			d.markDirtyAndSync()
 		}
 	case "k", "up":
 		// Higher pitch
 		if stage.Note < 7 {
 			stage.Note++
+			d.markDirtyAndSync()
 		} else if stage.Octave < 7 {
 			stage.Octave++
 			stage.Note = 0
+			d.markDirtyAndSync()
 		}
 	case " ":
 		stage.Gate = !stage.Gate
+		d.markDirtyAndSync()
 	case "r":
 		if stage.Ratchets > 1 {
 			stage.Ratchets--
+			d.markDirtyAndSync()
 		}
 	case "R":
 		if stage.Ratchets < 8 {
 			stage.Ratchets++
+			d.markDirtyAndSync()
 		}
 	case "s":
 		stage.Slide = !stage.Slide
+		d.markDirtyAndSync()
 	case "a":
 		if stage.Accumulator > -4 {
 			stage.Accumulator--
+			d.markDirtyAndSync()
 		}
 	case "A":
 		if stage.Accumulator < 3 {
 			stage.Accumulator++
+			d.markDirtyAndSync()
 		}
 	case "p":
 		if stage.Probability > 0 {
@@ -1137,6 +1164,7 @@ func (d *MetropolixDevice) HandleKey(key string) {
 			if stage.Probability < 0 {
 				stage.Probability = 0
 			}
+			d.markDirtyAndSync()
 		}
 	case "P":
 		if stage.Probability < 100 {
@@ -1144,19 +1172,23 @@ func (d *MetropolixDevice) HandleKey(key string) {
 			if stage.Probability > 100 {
 				stage.Probability = 100
 			}
+			d.markDirtyAndSync()
 		}
 	case "m":
 		pat.Mode = (pat.Mode + 1) % 4
+		d.markDirtyAndSync()
 	case "[":
 		if pat.Length > 1 {
 			pat.Length--
 			if s.Selected >= pat.Length {
 				s.Selected = pat.Length - 1
 			}
+			d.markDirtyAndSync()
 		}
 	case "]":
 		if pat.Length < 8 {
 			pat.Length++
+			d.markDirtyAndSync()
 		}
 	case "<", ",":
 		if s.Editing > 0 {
@@ -1171,19 +1203,19 @@ func (d *MetropolixDevice) HandleKey(key string) {
 	case "q":
 		// Cycle scale forward (wraps)
 		pat.Scale = (pat.Scale + 1) % ScaleCount
-		d.regeneratePatternInQueue(s.Editing)
+		d.markDirtyAndSync()
 	case "z":
 		// Root note down
 		if pat.RootNote > 0 {
 			pat.RootNote--
 		}
-		d.regeneratePatternInQueue(s.Editing)
+		d.markDirtyAndSync()
 	case "x":
 		// Root note up
 		if pat.RootNote < 127 {
 			pat.RootNote++
 		}
-		d.regeneratePatternInQueue(s.Editing)
+		d.markDirtyAndSync()
 	}
 }
 
@@ -1210,6 +1242,7 @@ func (d *MetropolixDevice) confirmClearPattern() {
 				Accumulator: 0,
 			}
 		}
+		d.markDirtyAndSync()
 	}
 	d.confirmMode = true
 }
@@ -1250,34 +1283,38 @@ func (d *MetropolixDevice) HandlePad(row, col int) {
 	case PageOctave:
 		if col < pat.Length {
 			pat.Stages[col].Octave = row
+			d.markDirtyAndSync()
 		}
 	case PageNotes:
 		if col < pat.Length {
 			pat.Stages[col].Note = row
+			d.markDirtyAndSync()
 		}
 	case PagePulseCount:
 		if col < pat.Length {
 			pat.Stages[col].PulseCount = row + 1
+			d.markDirtyAndSync()
 		}
 	case PageRatchets:
 		if col < pat.Length {
 			pat.Stages[col].Ratchets = row + 1
+			d.markDirtyAndSync()
 		}
 	case PageProbability:
 		if col < pat.Length {
-			// 8 levels: 0, 14, 28, 42, 57, 71, 85, 100
 			pat.Stages[col].Probability = row * 100 / 7
+			d.markDirtyAndSync()
 		}
 	case PageGate:
 		if col < pat.Length {
 			if row >= 2 && row <= 7 {
-				// Gate length: row 7 = index 5 (full), row 2 = index 0 (trigger)
 				pat.Stages[col].GateLength = row - 2
 			} else if row == 1 {
 				pat.Stages[col].Gate = !pat.Stages[col].Gate
 			} else if row == 0 {
 				pat.Stages[col].Slide = !pat.Stages[col].Slide
 			}
+			d.markDirtyAndSync()
 		}
 	case PageAccumulator:
 		d.handleAccumulatorPad(row, col)
@@ -1292,22 +1329,26 @@ func (d *MetropolixDevice) handleSettingsPad(row, col int) {
 	case 7: // Mode
 		if col < 4 {
 			pat.Mode = PlaybackMode(col)
+			d.markDirtyAndSync()
 		}
 	case 6: // Scale
 		if col < 4 {
 			pat.Scale = ScaleType(col)
+			d.markDirtyAndSync()
 		}
 	case 5: // Length
 		pat.Length = col + 1
 		if s.Selected >= pat.Length {
 			s.Selected = pat.Length - 1
 		}
+		d.markDirtyAndSync()
 	case 4: // Root note
-		// Adjust within current octave
 		currentOctave := int(pat.RootNote) / 12
 		pat.RootNote = uint8(currentOctave*12 + col)
+		d.markDirtyAndSync()
 	case 3: // Slide time
 		pat.SlideTime = col + 1
+		d.markDirtyAndSync()
 	}
 }
 
@@ -1323,17 +1364,15 @@ func (d *MetropolixDevice) handleAccumulatorPad(row, col int) {
 
 	switch s.AccumSubPage {
 	case AccumSubValue:
-		// Accumulator value: row 0 = -4, row 4 = 0, row 7 = +3
 		stage.Accumulator = row - 4
 	case AccumSubReset:
-		// Reset count: row 0 = never, rows 1-7 = reset after 1-7 triggers
 		stage.AccumReset = row
 	case AccumSubMode:
-		// Mode: row 0 = reset, row 1 = ping-pong, row 2 = hold
 		if row < 3 {
 			stage.AccumMode = row
 		}
 	}
+	d.markDirtyAndSync()
 }
 
 func (d *MetropolixDevice) renderLaunchpadHelp() string {

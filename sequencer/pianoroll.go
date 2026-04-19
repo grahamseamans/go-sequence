@@ -34,30 +34,39 @@ var EditHorizSteps = []float64{
 
 var EditVertSteps = []int{1, 12} // semitone, octave
 
+// PianoSchedule tracks what patterns play at what ticks (source of truth for playback)
+type PianoSchedule struct {
+	StartTick int64 // when patterns[0] starts
+	Patterns  []int // pattern indices in order
+}
+
 // PianoRollDevice reads/writes from central PianoState
 type PianoRollDevice struct {
 	state        *PianoState
 	heldNotes    map[uint8]bool            // runtime only - for note-off tracking during playback
 	pendingNotes map[uint8]*NoteEventState // runtime only - for recording note-on/note-off pairs
 
-	// Queue-based playback - protected by queueMu (held ONLY during swap, not generation)
+	// Schedule - source of truth for what plays when
+	schedule     PianoSchedule
+	patternDirty [NumPatterns]bool
+
+	// Queue - derived from schedule + pattern data
 	queueMu          sync.RWMutex
 	queue            []midi.Event // events sorted by tick
-	queuedUntilTick  int64        // how far we've filled the queue
-	patternStartTick int64        // tick when current pattern started
+	patternStartTick int64        // tick when current pattern started (updated by sync)
 	onQueueChange    func()       // callback to wake manager when queue needs recalc
-
-	// Pattern switching
-	nextPatternTick int64 // tick when next pattern should start (-1 if none)
 }
 
 // NewPianoRollDevice creates a device that operates on the given state
 func NewPianoRollDevice(state *PianoState) *PianoRollDevice {
 	return &PianoRollDevice{
-		state:           state,
-		heldNotes:       make(map[uint8]bool),
-		pendingNotes:    make(map[uint8]*NoteEventState),
-		nextPatternTick: -1,
+		state:        state,
+		heldNotes:    make(map[uint8]bool),
+		pendingNotes: make(map[uint8]*NoteEventState),
+		schedule: PianoSchedule{
+			StartTick: 0,
+			Patterns:  []int{0},
+		},
 	}
 }
 
@@ -119,90 +128,114 @@ func (p *PianoRollDevice) patternLengthTicks(patternNum int) int64 {
 	return int64(pat.Length * float64(PPQ))
 }
 
+// --- Schedule helpers ---
+
+func (p *PianoRollDevice) scheduleEndTick() int64 {
+	tick := p.schedule.StartTick
+	for _, patIdx := range p.schedule.Patterns {
+		tick += p.patternLengthTicks(patIdx)
+	}
+	return tick
+}
+
+func (p *PianoRollDevice) extendSchedule(targetTick int64) {
+	for p.scheduleEndTick() < targetTick {
+		lastPat := 0
+		if len(p.schedule.Patterns) > 0 {
+			lastPat = p.schedule.Patterns[len(p.schedule.Patterns)-1]
+		}
+		p.schedule.Patterns = append(p.schedule.Patterns, lastPat)
+	}
+}
+
+func (p *PianoRollDevice) trimSchedule(currentTick int64) {
+	for len(p.schedule.Patterns) > 1 {
+		firstPatLen := p.patternLengthTicks(p.schedule.Patterns[0])
+		if p.schedule.StartTick+firstPatLen <= currentTick {
+			p.schedule.StartTick += firstPatLen
+			p.schedule.Patterns = p.schedule.Patterns[1:]
+		} else {
+			break
+		}
+	}
+}
+
+func (p *PianoRollDevice) scheduleContainsDirty() bool {
+	for _, patIdx := range p.schedule.Patterns {
+		if p.patternDirty[patIdx] {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *PianoRollDevice) clearDirtyFlags() {
+	for i := range p.patternDirty {
+		p.patternDirty[i] = false
+	}
+}
+
+func (p *PianoRollDevice) queueEndTick() int64 {
+	p.queueMu.RLock()
+	defer p.queueMu.RUnlock()
+	if len(p.queue) == 0 {
+		return p.schedule.StartTick
+	}
+	return p.queue[len(p.queue)-1].Tick
+}
+
+// syncQueueToSchedule regenerates the queue from the schedule
+func (p *PianoRollDevice) syncQueueToSchedule() {
+	if !p.scheduleContainsDirty() {
+		return
+	}
+
+	var newQueue []midi.Event
+	tick := p.schedule.StartTick
+	for _, patIdx := range p.schedule.Patterns {
+		events := p.GeneratePattern(patIdx, tick)
+		newQueue = append(newQueue, events...)
+		tick += p.patternLengthTicks(patIdx)
+	}
+
+	if len(p.schedule.Patterns) > 0 {
+		p.state.Pattern = p.schedule.Patterns[0]
+	}
+	p.patternStartTick = p.schedule.StartTick
+
+	p.queueMu.Lock()
+	p.queue = newQueue
+	p.queueMu.Unlock()
+
+	p.clearDirtyFlags()
+	if p.onQueueChange != nil {
+		p.onQueueChange()
+	}
+}
+
+// markDirtyAndSync marks the editing pattern dirty and wakes queue manager
+func (p *PianoRollDevice) markDirtyAndSync() {
+	p.patternDirty[p.state.Editing] = true
+	if p.onQueueChange != nil {
+		p.onQueueChange()
+	}
+}
+
 // Device interface implementation - queue-based
 
 // FillUntil fills the event queue with events up to the given tick
 func (p *PianoRollDevice) FillUntil(tick int64) {
-	// Read current state
-	p.queueMu.RLock()
-	queuedUntil := p.queuedUntilTick
-	patternStart := p.patternStartTick
-	nextPatTick := p.nextPatternTick
-	p.queueMu.RUnlock()
+	p.trimSchedule(S.Tick)
+	p.extendSchedule(tick)
 
-	if queuedUntil >= tick {
-		return // already filled
+	if p.scheduleContainsDirty() {
+		p.syncQueueToSchedule()
 	}
-
-	// Generate events OUTSIDE the lock
-	var newEvents []midi.Event
-	currentPattern := p.state.Pattern
-	for queuedUntil < tick {
-		// Check for pattern switch at boundary
-		if nextPatTick >= 0 && queuedUntil >= nextPatTick {
-			p.state.Pattern = p.state.Next
-			currentPattern = p.state.Pattern
-			patternStart = nextPatTick
-			nextPatTick = -1
+	if len(p.queue) == 0 || p.queueEndTick() < tick {
+		for _, patIdx := range p.schedule.Patterns {
+			p.patternDirty[patIdx] = true
 		}
-
-		events := p.GeneratePattern(currentPattern, queuedUntil)
-		newEvents = append(newEvents, events...)
-		queuedUntil += p.patternLengthTicks(currentPattern)
-	}
-
-	// Swap in new events (brief lock)
-	p.queueMu.Lock()
-	p.queue = append(p.queue, newEvents...)
-	p.queuedUntilTick = queuedUntil
-	p.patternStartTick = patternStart
-	p.nextPatternTick = nextPatTick
-	p.queueMu.Unlock()
-}
-
-// regeneratePatternInQueue replaces events for a pattern if it's currently in the queue.
-// Called from UI thread - generates events WITHOUT holding lock, then swaps.
-func (p *PianoRollDevice) regeneratePatternInQueue(patternNum int) {
-	if patternNum != p.state.Pattern {
-		return // only regenerate if it's the playing pattern
-	}
-
-	patternTicks := p.patternLengthTicks(patternNum)
-
-	// --- Read current state (brief lock) ---
-	p.queueMu.RLock()
-	oldQueue := p.queue
-	oldQueuedUntil := p.queuedUntilTick
-	patternStart := p.patternStartTick
-	p.queueMu.RUnlock()
-
-	// --- Generate new queue OUTSIDE the lock (this is the slow part) ---
-	var newQueue []midi.Event
-
-	// Keep events before current pattern start
-	for _, e := range oldQueue {
-		if e.Tick < patternStart {
-			newQueue = append(newQueue, e)
-		}
-	}
-
-	// Regenerate from pattern start to where we had queued
-	newQueuedUntil := patternStart
-	for newQueuedUntil < oldQueuedUntil {
-		events := p.GeneratePattern(p.state.Pattern, newQueuedUntil)
-		newQueue = append(newQueue, events...)
-		newQueuedUntil += patternTicks
-	}
-
-	// --- Swap in new queue (brief lock) ---
-	p.queueMu.Lock()
-	p.queue = newQueue
-	p.queuedUntilTick = newQueuedUntil
-	p.queueMu.Unlock()
-
-	// --- Wake dispatch loop to recalculate next event ---
-	if p.onQueueChange != nil {
-		p.onQueueChange()
+		p.syncQueueToSchedule()
 	}
 }
 
@@ -233,12 +266,13 @@ func (p *PianoRollDevice) PopNextEvent() *midi.Event {
 // ClearQueue clears all queued events (for stop/restart)
 func (p *PianoRollDevice) ClearQueue() {
 	p.queueMu.Lock()
-	defer p.queueMu.Unlock()
-
 	p.queue = nil
-	p.queuedUntilTick = 0
+	p.queueMu.Unlock()
+
+	p.schedule.StartTick = 0
+	p.schedule.Patterns = []int{p.state.Pattern}
 	p.patternStartTick = 0
-	p.nextPatternTick = -1
+	p.clearDirtyFlags()
 	p.heldNotes = make(map[uint8]bool)
 }
 
@@ -249,49 +283,32 @@ func (p *PianoRollDevice) QueuePattern(patIdx int, atTick int64) {
 	}
 	p.state.Next = patIdx
 
-	// Find next pattern boundary
-	pat := &p.state.Patterns[p.state.Pattern]
-	ticksPerBeat := int64(PPQ)
-	patternTicks := int64(pat.Length * float64(ticksPerBeat))
+	p.extendSchedule(atTick)
 
-	// Read state under lock
-	p.queueMu.RLock()
-	patternStart := p.patternStartTick
-	queuedUntil := p.queuedUntilTick
-	p.queueMu.RUnlock()
-
-	// Calculate when the next pattern boundary occurs
-	ticksSinceStart := atTick - patternStart
-	ticksIntoPattern := ticksSinceStart % patternTicks
-	ticksToNextBoundary := patternTicks - ticksIntoPattern
-	boundaryTick := atTick + ticksToNextBoundary
-
-	needsNotify := false
-
-	// If we've already queued past the boundary, wipe those events
-	if queuedUntil > boundaryTick {
-		p.queueMu.Lock()
-		newQueue := p.queue[:0]
-		for _, e := range p.queue {
-			if e.Tick < boundaryTick {
-				newQueue = append(newQueue, e)
+	tick := p.schedule.StartTick
+	foundSlot := false
+	for i, idx := range p.schedule.Patterns {
+		patLen := p.patternLengthTicks(idx)
+		if tick+patLen > atTick {
+			nextSlot := i + 1
+			if nextSlot < len(p.schedule.Patterns) {
+				for j := nextSlot; j < len(p.schedule.Patterns); j++ {
+					p.schedule.Patterns[j] = patIdx
+				}
+			} else {
+				p.schedule.Patterns = append(p.schedule.Patterns, patIdx)
 			}
+			foundSlot = true
+			break
 		}
-		p.queue = newQueue
-		p.queuedUntilTick = boundaryTick
-		p.nextPatternTick = boundaryTick
-		p.queueMu.Unlock()
-		needsNotify = true
-	} else {
-		p.queueMu.Lock()
-		p.nextPatternTick = boundaryTick
-		p.queueMu.Unlock()
+		tick += patLen
+	}
+	if !foundSlot {
+		p.schedule.Patterns = append(p.schedule.Patterns, patIdx)
 	}
 
-	// Wake manager outside the lock
-	if needsNotify && p.onQueueChange != nil {
-		p.onQueueChange()
-	}
+	p.patternDirty[patIdx] = true
+	p.syncQueueToSchedule()
 }
 
 // CurrentPattern returns the currently playing pattern
@@ -301,8 +318,8 @@ func (p *PianoRollDevice) CurrentPattern() int {
 
 // NextPattern returns the queued pattern (-1 if none)
 func (p *PianoRollDevice) NextPattern() int {
-	if p.nextPatternTick >= 0 {
-		return p.state.Next
+	if len(p.schedule.Patterns) > 1 && p.schedule.Patterns[1] != p.schedule.Patterns[0] {
+		return p.schedule.Patterns[1]
 	}
 	return -1
 }
@@ -317,36 +334,124 @@ func (p *PianoRollDevice) ContentMask() []bool {
 	return mask
 }
 
+// --- Core edit functions (all operate on Editing pattern, call markDirtyAndSync) ---
+
+func (p *PianoRollDevice) AddNote(start, duration float64, pitch uint8, velocity uint8) {
+	pat := &p.state.Patterns[p.state.Editing]
+	if duration < 0.25 {
+		duration = 0.25
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start+duration > pat.Length {
+		return
+	}
+	pat.Notes = append(pat.Notes, NoteEventState{
+		Start: start, Duration: duration, Pitch: pitch, Velocity: velocity,
+	})
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) AddNoteFromRecord(note NoteEventState) {
+	pat := &p.state.Patterns[p.state.Editing]
+	pat.Notes = append(pat.Notes, note)
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) DeleteNote(idx int) {
+	pat := &p.state.Patterns[p.state.Editing]
+	if idx < 0 || idx >= len(pat.Notes) {
+		return
+	}
+	pat.Notes = append(pat.Notes[:idx], pat.Notes[idx+1:]...)
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) MoveNoteTime(idx int, deltaBeat float64) {
+	pat := &p.state.Patterns[p.state.Editing]
+	if idx < 0 || idx >= len(pat.Notes) {
+		return
+	}
+	n := &pat.Notes[idx]
+	n.Start += deltaBeat
+	if n.Start < 0 {
+		n.Start = 0
+	}
+	if n.Start+n.Duration > pat.Length {
+		n.Start = pat.Length - n.Duration
+	}
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) MoveNotePitch(idx int, deltaSemitones int) {
+	pat := &p.state.Patterns[p.state.Editing]
+	if idx < 0 || idx >= len(pat.Notes) {
+		return
+	}
+	n := &pat.Notes[idx]
+	if int(n.Pitch)+deltaSemitones < 0 {
+		n.Pitch = 0
+	} else if int(n.Pitch)+deltaSemitones > 127 {
+		n.Pitch = 127
+	} else {
+		n.Pitch = uint8(int(n.Pitch) + deltaSemitones)
+	}
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) SetNoteDuration(idx int, duration float64) {
+	pat := &p.state.Patterns[p.state.Editing]
+	if idx < 0 || idx >= len(pat.Notes) {
+		return
+	}
+	n := &pat.Notes[idx]
+	if duration < 0.25 {
+		duration = 0.25
+	}
+	if n.Start+duration > pat.Length {
+		duration = pat.Length - n.Start
+	}
+	n.Duration = duration
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) SetPatternLength(beats float64) {
+	if beats < 1.0 || beats > 64.0 {
+		return
+	}
+	pat := &p.state.Patterns[p.state.Editing]
+	pat.Length = beats
+	p.markDirtyAndSync()
+}
+
+func (p *PianoRollDevice) ClearEditingPattern() {
+	pat := &p.state.Patterns[p.state.Editing]
+	pat.Notes = []NoteEventState{}
+	p.markDirtyAndSync()
+}
+
 func (p *PianoRollDevice) HandleMIDI(event midi.Event) {
-	// Only record while playing and recording is enabled
 	if !S.Playing || !p.state.Recording {
 		return
 	}
 
-	pattern := &p.state.Patterns[p.state.Editing]
-	// Get current beat from global tick
 	currentBeat := p.currentBeat()
-
-	// Quantize to nearest 1/16th note
 	quantized := float64(int(currentBeat*4+0.5)) / 4.0
 
 	if event.Type == midi.NoteOn && event.Velocity > 0 {
-		// Note on - start a pending note
 		p.pendingNotes[event.Note] = &NoteEventState{
-			Start:    quantized,
-			Pitch:    event.Note,
-			Velocity: event.Velocity,
+			Start: quantized, Pitch: event.Note, Velocity: event.Velocity,
 		}
 	} else if event.Type == midi.NoteOff || (event.Type == midi.NoteOn && event.Velocity == 0) {
-		// Note off - complete the pending note
 		if pending, ok := p.pendingNotes[event.Note]; ok {
 			endBeat := float64(int(currentBeat*4+0.5)) / 4.0
 			duration := endBeat - pending.Start
 			if duration < 0.25 {
-				duration = 0.25 // minimum 1/16th note
+				duration = 0.25
 			}
 			pending.Duration = duration
-			pattern.Notes = append(pattern.Notes, *pending)
+			p.AddNoteFromRecord(*pending)
 			delete(p.pendingNotes, event.Note)
 		}
 	}
@@ -692,35 +797,31 @@ func (p *PianoRollDevice) HandleKey(key string) {
 	case "y":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[s.SelectedNote]
-			if n.Start >= editH {
-				n.Start -= editH
-			} else {
-				n.Start = 0
+			delta := -editH
+			if n.Start+delta < 0 {
+				delta = -n.Start
 			}
+			p.MoveNoteTime(s.SelectedNote, delta)
 			p.centerOnSelection()
 		}
 	case "o":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[s.SelectedNote]
-			if n.Start+n.Duration+editH <= pat.Length {
-				n.Start += editH
+			delta := editH
+			if n.Start+n.Duration+delta > pat.Length {
+				delta = pat.Length - n.Start - n.Duration
 			}
+			p.MoveNoteTime(s.SelectedNote, delta)
 			p.centerOnSelection()
 		}
 	case "u":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
-			n := &pat.Notes[s.SelectedNote]
-			if int(n.Pitch) >= editV {
-				n.Pitch -= uint8(editV)
-			}
+			p.MoveNotePitch(s.SelectedNote, -editV)
 			p.centerOnSelection()
 		}
 	case "i":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
-			n := &pat.Notes[s.SelectedNote]
-			if int(n.Pitch)+editV <= 127 {
-				n.Pitch += uint8(editV)
-			}
+			p.MoveNotePitch(s.SelectedNote, editV)
 			p.centerOnSelection()
 		}
 
@@ -728,14 +829,14 @@ func (p *PianoRollDevice) HandleKey(key string) {
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[s.SelectedNote]
 			if n.Duration > editH {
-				n.Duration -= editH
+				p.SetNoteDuration(s.SelectedNote, n.Duration-editH)
 			}
 		}
 	case "m":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[s.SelectedNote]
 			if n.Start+n.Duration+editH <= pat.Length {
-				n.Duration += editH
+				p.SetNoteDuration(s.SelectedNote, n.Duration+editH)
 			}
 		}
 
@@ -770,22 +871,14 @@ func (p *PianoRollDevice) HandleKey(key string) {
 		}
 
 	case " ":
-		newNote := NoteEventState{
-			Start:    s.CenterBeat,
-			Duration: EditHorizSteps[s.EditHoriz] * 4,
-			Pitch:    uint8(s.CenterPitch),
-			Velocity: 100,
-		}
-		if newNote.Duration < 0.25 {
-			newNote.Duration = 0.25
-		}
-		pat.Notes = append(pat.Notes, newNote)
+		dur := EditHorizSteps[s.EditHoriz] * 4
+		p.AddNote(s.CenterBeat, dur, uint8(s.CenterPitch), 100)
 		s.SelectedNote = len(pat.Notes) - 1
 		p.centerOnSelection()
 
 	case "x":
 		if s.SelectedNote >= 0 && s.SelectedNote < len(pat.Notes) {
-			pat.Notes = append(pat.Notes[:s.SelectedNote], pat.Notes[s.SelectedNote+1:]...)
+			p.DeleteNote(s.SelectedNote)
 			if s.SelectedNote >= len(pat.Notes) {
 				s.SelectedNote = len(pat.Notes) - 1
 			}
@@ -796,15 +889,15 @@ func (p *PianoRollDevice) HandleKey(key string) {
 
 	case "[":
 		if pat.Length > 1.0 {
-			pat.Length -= 1.0
+			p.SetPatternLength(pat.Length - 1.0)
 		}
 	case "]":
 		if pat.Length < 64.0 {
-			pat.Length += 1.0
+			p.SetPatternLength(pat.Length + 1.0)
 		}
 
 	case "c":
-		pat.Notes = []NoteEventState{}
+		p.ClearEditingPattern()
 		s.SelectedNote = -1
 
 	case "<":
@@ -867,16 +960,11 @@ func (p *PianoRollDevice) HandlePad(row, col int) {
 		}
 	}
 
-	newNote := NoteEventState{
-		Start:    beat,
-		Duration: viewScale,
-		Pitch:    pitch,
-		Velocity: 100,
+	dur := viewScale
+	if dur < 0.25 {
+		dur = 0.25
 	}
-	if newNote.Duration < 0.25 {
-		newNote.Duration = 0.25
-	}
-	pat.Notes = append(pat.Notes, newNote)
+	p.AddNote(beat, dur, pitch, 100)
 	s.SelectedNote = len(pat.Notes) - 1
 	p.centerOnSelection()
 }
