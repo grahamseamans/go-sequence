@@ -48,9 +48,10 @@ Three top-level chunks. MIDI I/O and Control Surface live *inside* Controller be
 
 ### Critical (refactor-blocking)
 
-1. **Verify `LoadProject()` is real.** Audit agent flagged `sequencer/project.go:159` as a stub. If true, load is silently broken — explains "I remember it really not working." First thing to check next session.
-2. **Finish schedule refactor in piano + metropolix.** Direction is correct (Schedule struct = Model, queue derivation = Controller). Currently ~75% done in those two devices; not yet applied to drum/session/settings/empty.
-3. **Apply schedule pattern to remaining devices** for interface consistency.
+1. **Finish schedule refactor in piano + metropolix.** Direction is correct (Schedule struct = Model, queue derivation = Controller). Currently ~75% done in those two devices; not yet applied to drum/session/settings/empty.
+2. **Apply schedule pattern to remaining devices** for interface consistency.
+
+(Note: audit agent flagged `LoadProject()` as a stub — verified 2026-04-19, it's fully implemented at `project.go:161-216`. Agent was wrong.)
 
 ### High (pre-merge)
 
@@ -84,6 +85,5 @@ Three top-level chunks. MIDI I/O and Control Surface live *inside* Controller be
 
 ## Next session
 
-1. Verify `LoadProject()` status (5 min).
-2. Decide order: finish the in-flight schedule refactor first, or restructure the directory layout first? My (Claude's) instinct: schedule refactor first, since it's already in flight and won't get easier with time. Directory restructure can ride along.
-3. Plan stage — turn this punch list into a sized, ordered roadmap with concrete steps.
+1. Decide order: finish the in-flight schedule refactor first, or restructure the directory layout first? My (Claude's) instinct: schedule refactor first, since it's already in flight and won't get easier with time. Directory restructure can ride along.
+2. Plan stage — turn this punch list into a sized, ordered roadmap with concrete steps.
