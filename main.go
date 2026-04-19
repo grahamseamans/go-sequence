@@ -1,101 +1,60 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
-
-	"go-sequence/config"
+	"go-sequence/controller"
 	"go-sequence/debug"
 	"go-sequence/midi"
-	"go-sequence/sequencer"
-	"go-sequence/theme"
-	"go-sequence/tui"
+	"go-sequence/model"
+	"go-sequence/view/keyboard"
+	"go-sequence/view/launchpad"
+	"go-sequence/view/tui"
 )
 
 func main() {
-	fmt.Println("starting...")
-
-	// Enable debug logging
+	fmt.Println("go-sequence")
 	debug.Enable()
 	defer debug.Disable()
 
-	// Load config
-	fmt.Println("loading config...")
-	cfg, err := config.Load()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Model — fresh project with defaults. Persisted save-load lands when
+	// the project browser UI is wired; for now we always start empty.
+	project := model.New()
+	project.Validate()
+
+	// MIDI ports — output for playback, input for the keyboard view.
+	ports, err := midi.NewPorts()
 	if err != nil {
-		fmt.Printf("Warning: could not load config: %v\n", err)
-		cfg = config.DefaultConfig()
-	}
-
-	// Load theme
-	fmt.Println("loading theme...")
-	palette := theme.MustLoadGPL("palettes/plasma.gpl")
-	th := theme.New(palette)
-
-	// Create sequencer manager
-	fmt.Println("creating sequencer...")
-	manager := sequencer.NewManager()
-
-	// Assign devices to slots
-	manager.SetDevice(0, manager.CreateDrumDevice(0))
-	manager.SetDevice(1, manager.CreateDrumDevice(1))
-	manager.SetDevice(2, manager.CreatePianoDevice(2))
-	// Remaining slots get EmptyDevice
-	for i := 3; i < 8; i++ {
-		manager.SetDevice(i, manager.CreateEmptyDevice(i))
-	}
-
-	// Create session (clip launcher)
-	session := sequencer.NewSessionDevice(manager)
-	manager.SetSession(session)
-
-	// Create settings device
-	settings := sequencer.NewSettingsDevice(manager)
-	manager.SetSettings(settings)
-
-	// Create save device
-	saveDevice := sequencer.NewSaveDevice(manager)
-	manager.SetSave(saveDevice)
-
-	// Start all runtime goroutines
-	manager.StartRuntime()
-
-	// Create MIDI device manager
-	fmt.Println("initializing MIDI...")
-	deviceMgr := midi.NewDeviceManager()
-
-	// Try to connect to controller once on startup (with timeout, won't hang)
-	fmt.Println("connecting controller...")
-	fmt.Println("")
-	fmt.Println("go-sequence")
-	if err := deviceMgr.Connect(cfg); err != nil {
-		fmt.Printf("No controller: %v\n", err)
-		fmt.Println("Press 'r' in the app to scan for devices")
-	} else {
-		ctrl := deviceMgr.GetController()
-		if ctrl != nil {
-			fmt.Printf("Connected: %s\n", ctrl.ID())
-			manager.SetController(ctrl)
-		}
-	}
-
-	// Wire MIDI input if available
-	if noteInput := deviceMgr.GetNoteInput(); noteInput != nil {
-		manager.SetMIDIInput(noteInput)
-	}
-	fmt.Println("")
-
-	// Create and run TUI
-	m := tui.NewModel(manager, deviceMgr, cfg, th)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("midi: %v\n", err)
 		os.Exit(1)
 	}
+	defer ports.Close()
 
-	// Cleanup
-	deviceMgr.Disconnect()
+	// Control surface — Mock for now (no Launchpad auto-discovery yet).
+	// Swap in launchpad.NewLaunchpad(...) once the port-discovery story
+	// from the old midi.DeviceManager lands in the new stack.
+	surf := launchpad.NewMock()
+	defer surf.Close()
+
+	// SaveOps wires the project-browser view to controller/project.go file I/O.
+	saveOps := controller.NewControllerSaveOps()
+
+	// Background routines — each runs in its own goroutine.
+	go controller.RunPlayback(ctx, project, ports)
+	go controller.RunPatternCompiler(ctx, project)
+	go launchpad.RunRoutine(ctx, project, ports, saveOps, surf)
+	go keyboard.RunRoutine(ctx, project, ports, ports)
+
+	// TUI blocks until the user quits (q / ctrl+c) or ctx is cancelled.
+	if err := tui.Run(ctx, project, ports, saveOps); err != nil {
+		fmt.Printf("tui: %v\n", err)
+		os.Exit(1)
+	}
 }
