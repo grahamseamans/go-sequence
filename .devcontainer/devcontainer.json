@@ -56,7 +56,10 @@
     "GOPATH": "/home/node/go",
     "GOCACHE": "/home/node/.cache/go-build",
     "GOMODCACHE": "/home/node/go/pkg/mod",
-    "CGO_ENABLED": "1"
+    "CGO_ENABLED": "1",
+    "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
+    "WEATHER_LAT": "${localEnv:WEATHER_LAT}",
+    "WEATHER_LON": "${localEnv:WEATHER_LON}"
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
