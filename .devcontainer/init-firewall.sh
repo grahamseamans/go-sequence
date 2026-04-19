@@ -82,7 +82,10 @@ for domain in \
     "storage.googleapis.com" \
     "gitlab.com" \
     "api.x.ai" \
-    "x.ai"; do
+    "x.ai" \
+    "pypi.org" \
+    "files.pythonhosted.org" \
+    "astral.sh"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then

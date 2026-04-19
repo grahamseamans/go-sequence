@@ -34,7 +34,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   pkg-config \
   libasound2-dev \
   libjack-jackd2-dev \
+  python3 \
+  python3-venv \
+  ca-certificates \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install uv (Python package/project manager). System-wide so `uv` is on
+# PATH for all users. Needed for Python-based MCPs (digikey) and general
+# Python scripting per the python-runtime skill.
+RUN curl -LsSf https://astral.sh/uv/install.sh | \
+  env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=/usr/local/bin sh
 
 # Ensure default node user has access to /usr/local/share
 RUN mkdir -p /usr/local/share/npm-global && \
