@@ -1,5 +1,7 @@
 package devices
 
+import "sync/atomic"
+
 // PlaybackMode selects how the Metropolix walks through its active stages.
 type PlaybackMode int
 
@@ -55,23 +57,29 @@ type MetropolixStage struct {
 }
 
 // MetropolixPattern is a Metropolix pattern spec.
+//
+// Machine holds the dual-buffer of rendered events for this pattern; see the
+// DrumPattern doc comment for the dual-buffer contract. Not persisted.
 type MetropolixPattern struct {
-	Stages    [8]MetropolixStage `json:"stages"`
-	Length    int                `json:"length"`
-	Mode      PlaybackMode       `json:"mode"`
-	Scale     ScaleType          `json:"scale"`
-	RootNote  uint8              `json:"rootNote"`
-	SlideTime int                `json:"slideTime"`
+	Stages    [8]MetropolixStage                 `json:"stages"`
+	Length    int                                `json:"length"`
+	Mode      PlaybackMode                       `json:"mode"`
+	Scale     ScaleType                          `json:"scale"`
+	RootNote  uint8                              `json:"rootNote"`
+	SlideTime int                                `json:"slideTime"`
+	Machine   [2]atomic.Pointer[CompiledPattern] `json:"-"`
 }
 
-// Metropolix is the persisted per-track Metropolix device spec.
+// Metropolix is the persisted per-track Metropolix device spec. Patterns is
+// a pointer array so MetropolixPattern values (with their non-copyable
+// atomic fields) stay at stable heap addresses.
 type Metropolix struct {
-	Patterns          [NumPatterns]MetropolixPattern `json:"patterns"`
-	Schedule          Schedule                       `json:"schedule"`
-	EditingPatternIdx int                            `json:"editingPattern"`
-	Page              int                            `json:"page"`
-	Selected          int                            `json:"selected"`
-	AccumSubPage      int                            `json:"accumSubPage"`
+	Patterns          [NumPatterns]*MetropolixPattern `json:"patterns"`
+	Schedule          Schedule                        `json:"schedule"`
+	EditingPatternIdx int                             `json:"editingPattern"`
+	Page              int                             `json:"page"`
+	Selected          int                             `json:"selected"`
+	AccumSubPage      int                             `json:"accumSubPage"`
 }
 
 // Validate clamps Metropolix fields into valid ranges.
@@ -100,7 +108,10 @@ func (m *Metropolix) Validate() {
 	}
 
 	for i := range m.Patterns {
-		pat := &m.Patterns[i]
+		if m.Patterns[i] == nil {
+			m.Patterns[i] = &MetropolixPattern{}
+		}
+		pat := m.Patterns[i]
 
 		if pat.Length < 1 {
 			pat.Length = 1

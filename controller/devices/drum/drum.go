@@ -21,30 +21,27 @@ import (
 // NoteOff. Drum hits are short, so a fixed short duration is fine.
 const noteDurationTicks int64 = 60
 
-// Compile renders the currently-playing drum pattern into a CompiledPattern.
+// Compile renders a single drum pattern into a CompiledPattern.
 //
-// Pure: no I/O, no mutation of spec, no globals. Same (spec, kit, seed) →
-// same output.
+// Pure: no I/O, no mutation of spec, no globals. Same (pattern, kit, seed)
+// → same output. The caller picks which pattern to render (the Compiler
+// goroutine reads track.Drum.Patterns[req.Pattern] and passes it in), so
+// the Schedule.Playing indirection no longer lives here.
 //
 // Signature diverges from DESIGN.md §5.4: Compile takes an explicit
-// `kit devices.Kit` because the kit lives on the Track, not on the Drum spec,
-// and Compile is a pure function of its inputs. The caller (Compiler
-// goroutine) resolves kit from the track before invoking.
-func Compile(spec *devices.Drum, kit devices.Kit, seed uint64) devices.CompiledPattern {
+// `kit devices.Kit` because the kit lives on the Track, not on the Drum
+// spec.
+func Compile(pat *devices.DrumPattern, kit devices.Kit, seed uint64) devices.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Drum currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
 	// TODO(probability): use r when per-step probability lands.
 	_ = rng.NewRng(seed)
 
-	playingIdx := spec.Schedule.Playing
-	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
-		// Validate() normally guarantees this, but be defensive: empty
-		// pattern, length 1 (divide-by-zero guard in the walker).
+	if pat == nil {
 		return devices.CompiledPattern{Length: 1}
 	}
 
-	pat := &spec.Patterns[playingIdx]
 	length := int64(pat.Length)
 	if length < 1 {
 		length = 1
@@ -117,7 +114,6 @@ func Compile(spec *devices.Drum, kit devices.Kit, seed uint64) devices.CompiledP
 		return events[i].Tick < events[j].Tick
 	})
 
-	// EditCounter is stamped by the Compiler goroutine after Compile returns.
 	return devices.CompiledPattern{
 		Events: events,
 		Length: length,
@@ -139,7 +135,7 @@ func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, 
 		return
 	}
 	state := track.Drum
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 
 	// Top 4 rows (rows 4-7): step toggle for the selected lane.
 	if row >= 4 && row <= 7 {
@@ -205,7 +201,7 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 		return
 	}
 	state := track.Drum
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 
 	switch key {
 	case "h", "left":
@@ -275,7 +271,7 @@ func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	// We don't have the live playback tick here (not plumbed yet). Write at
 	// the cursor and advance — matches the pad-recording shortcut above.
 	// Revisit in step 4 when playback tick is available to the input path.
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	setStep(pat, laneIdx, state.Cursor, ev.Velocity)
 }
 

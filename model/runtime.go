@@ -4,8 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"go-sequence/model/devices"
 )
 
 // Runtime state for a Project. Every type here is referenced by Project's
@@ -13,9 +11,17 @@ import (
 // §3.2 — "Model owns ALL state", the persisted/runtime distinction is
 // just a JSON tag.
 
-// Cursor is a per-track playback position within its currently-playing pattern.
+// Cursor is a per-track playback position within its currently-playing
+// pattern. The dual-buffer now lives PER HUMAN PATTERN (pattern.Machine),
+// so the cursor carries which slot (0 or 1) playback is reading, plus the
+// tick-within-pattern of the last event emission for the bound-the-window
+// pass on each tick. T0 anchors the currently-playing pattern's start to
+// wall-clock time so pattern position can be derived without advancing a
+// stored playhead mid-tick.
 type Cursor struct {
-	Tick int64
+	T0           time.Time // wall-clock anchor at which the current pattern started
+	CurrentSlot  int       // 0 or 1 — which Machine slot playback is reading
+	LastPosition int64     // ticks-within-current-pattern of the last emission
 }
 
 // FocusKind selects which domain is active in the UI.
@@ -41,21 +47,13 @@ type UIState struct {
 	LastFocusedTrack int // remembered when user navigates away from a track view
 }
 
-// PlaybackState is the runtime state owned by the playback goroutine.
-// All atomics so the tick path stays lock-free; the non-atomic fields are
-// touched only by Play/Pause/SetTempo, which run on the input goroutine.
+// PlaybackState is the runtime transport and per-track cursor state owned by
+// the playback goroutine. No longer carries compiled events: those live in
+// each DrumPattern/PianoPattern/MetropolixPattern's Machine slots. Stale
+// detection is no longer done by edit-counter comparison either — playback
+// marks consumed slots nil and the compile goroutine fills them.
 type PlaybackState struct {
 	Cursors [8]Cursor
-
-	// Double-buffered per-track events. Playback reads current; compile
-	// writes next. At wrap boundary, current ← next (atomic swap).
-	CurrentEvents [8]atomic.Pointer[devices.CompiledPattern]
-	NextEvents    [8]atomic.Pointer[devices.CompiledPattern]
-
-	// EditCounters[i] is bumped by controller mutators on any spec
-	// mutation. Compile stamps the value onto each CompiledPattern; wrap
-	// handler uses it to detect stale current events.
-	EditCounters [8]atomic.Uint64
 
 	Playing atomic.Bool
 	Tick    atomic.Int64 // global tick count since last Play()
@@ -75,12 +73,24 @@ type PlaybackState struct {
 	Tempo atomic.Int64
 }
 
+// CompileRequest names a single (track, pattern, slot) target for the
+// compile goroutine. Each request fills exactly ONE Machine slot with a
+// freshly-rolled CompiledPattern. Callers that want both slots filled send
+// two requests — one per slot — so the "fresh rolls every loop" contract
+// (DESIGN §3.10) applies uniformly whether the trigger was an edit, a
+// queue change, or a wrap-and-refill.
+type CompileRequest struct {
+	Track   int
+	Pattern int
+	Slot    int
+}
+
 // CompileState is the runtime state owned by the compile goroutine (plus
 // the input goroutine which produces on Channel).
 type CompileState struct {
-	// Channel carries trackIdx values. Mutators send; RunCompile reads.
-	// Buffered to ~16 so bursty edits never block.
-	Channel chan int
+	// Channel carries CompileRequest values. Mutators send; RunCompile
+	// reads. Buffered so bursty edits never block the sender.
+	Channel chan CompileRequest
 
 	// LoopCounter disambiguates seeds when multiple compiles land in the
 	// same nanosecond. Bumped atomically inside RunCompile.
@@ -90,5 +100,5 @@ type CompileState struct {
 // NewCompileState returns a CompileState with a buffered channel ready
 // to use. Call once at project construction.
 func NewCompileState() CompileState {
-	return CompileState{Channel: make(chan int, 16)}
+	return CompileState{Channel: make(chan CompileRequest, 32)}
 }

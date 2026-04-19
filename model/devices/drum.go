@@ -1,5 +1,7 @@
 package devices
 
+import "sync/atomic"
+
 // DrumStep is one step in a drum note lane.
 type DrumStep struct {
 	Active   bool  `json:"active"`
@@ -13,19 +15,33 @@ type NoteLane struct {
 }
 
 // DrumPattern is a drum pattern spec. Length is in ticks.
+//
+// Machine is the per-pattern dual-buffer of rendered events. Playback reads
+// Machine[CurrentSlot]; when a loop wraps, the playback routine clears the
+// consumed slot (Store(nil)) and signals compile to refill it with a fresh
+// roll. Compile fills any nil slot and stores a *CompiledPattern.
+//
+// Not persisted (json:"-"). The pattern is only referenced via *DrumPattern
+// (see Drum.Patterns below) because atomic.Pointer cannot be safely copied —
+// pointer patterns give us stable backing addresses.
 type DrumPattern struct {
-	Notes  [16]NoteLane `json:"notes"`
-	Length int          `json:"length"`
+	Notes   [16]NoteLane                       `json:"notes"`
+	Length  int                                `json:"length"`
+	Machine [2]atomic.Pointer[CompiledPattern] `json:"-"`
 }
 
 // Drum is the persisted per-track drum device spec.
+//
+// Patterns holds pointers so each DrumPattern (which contains non-copyable
+// atomic.Pointer fields in Machine) lives at a stable heap address. Never
+// copy a *DrumPattern by value; always operate through the pointer.
 type Drum struct {
-	Patterns          [NumPatterns]DrumPattern `json:"patterns"`
-	Schedule          Schedule                 `json:"schedule"`
-	EditingPatternIdx int                      `json:"editingPattern"`
-	SelectedNoteIdx   int                      `json:"selectedNote"`
-	Cursor            int                      `json:"cursor"`
-	Recording         bool                     `json:"-"`
+	Patterns          [NumPatterns]*DrumPattern `json:"patterns"`
+	Schedule          Schedule                  `json:"schedule"`
+	EditingPatternIdx int                       `json:"editingPattern"`
+	SelectedNoteIdx   int                       `json:"selectedNote"`
+	Cursor            int                       `json:"cursor"`
+	Recording         bool                      `json:"-"`
 }
 
 // Validate clamps Drum fields into valid ranges and fills in defaults.
@@ -50,7 +66,10 @@ func (d *Drum) Validate() {
 
 	defaultLength := 16 * (PPQ / 4) // one bar of 16th-notes in ticks
 	for i := range d.Patterns {
-		pat := &d.Patterns[i]
+		if d.Patterns[i] == nil {
+			d.Patterns[i] = &DrumPattern{}
+		}
+		pat := d.Patterns[i]
 		if pat.Length < 1 {
 			pat.Length = defaultLength
 		}

@@ -13,40 +13,30 @@ import (
 	"go-sequence/model/devices"
 )
 
-// Compiler consumes trackIdx on compileCh, renders the track's pattern via
-// the appropriate device's Compile method with a fresh seed, and stores the
-// result into nextEvents for the playback engine to swap in at the next wrap.
+// Compiler consumes CompileRequest on compileCh and fills the named
+// Machine slot with a fresh CompiledPattern. Runs as its own goroutine so
+// playback never blocks on compile.
 //
-// Runs as its own goroutine so playback never blocks on compile. InputManager
-// and PlaybackEngine both send trackIdx on compileCh to request a recompile;
-// Compiler serializes those requests and publishes results via atomic stores
-// into the double-buffer's "next" slot.
+// Contract: each request targets one (Track, Pattern, Slot) triple and
+// unconditionally overwrites that slot. Callers that need both slots
+// refilled (an edit, initial bootstrap, a wrap-promoted pattern) send two
+// requests. The "fresh rolls every loop" invariant (DESIGN §3.10) falls
+// out of every request getting its own seed.
 type Compiler struct {
-	project      *model.Project
-	nextEvents   *[8]atomic.Pointer[devices.CompiledPattern]
-	editCounters *[8]atomic.Uint64
-	compileCh    <-chan int
+	project   *model.Project
+	compileCh <-chan model.CompileRequest
 
 	// loopCounter mixes into the seed so two compiles in the same nanosecond
-	// for the same track still get distinct seeds. Per DESIGN §7.
+	// for the same (track, pattern, slot) still get distinct seeds.
 	loopCounter atomic.Uint64
 }
 
-// NewCompiler wires the compiler up to PlaybackEngine's double-buffer
-// pointers and the shared compileCh. The sender end of compileCh is held by
-// InputManager (edits, queue) and PlaybackEngine (wrap promotion) — both
-// signal "please compile track i".
-func NewCompiler(
-	project *model.Project,
-	pe *PlaybackEngine,
-	compileCh <-chan int,
-) *Compiler {
-	return &Compiler{
-		project:      project,
-		nextEvents:   pe.NextEvents(),
-		editCounters: pe.EditCounters(),
-		compileCh:    compileCh,
-	}
+// NewCompiler wires the compiler up to the shared compileCh. The sender end
+// of compileCh is held by InputManager (edits, queue) and PlaybackEngine
+// (wrap promotion, Play bootstrap) — both signal "please render this one
+// slot".
+func NewCompiler(project *model.Project, compileCh <-chan model.CompileRequest) *Compiler {
+	return &Compiler{project: project, compileCh: compileCh}
 }
 
 // Run consumes compileCh until ctx is done or the channel is closed.
@@ -56,72 +46,87 @@ func (c *Compiler) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case trackIdx, ok := <-c.compileCh:
+		case req, ok := <-c.compileCh:
 			if !ok {
 				return
 			}
-			if trackIdx < 0 || trackIdx >= 8 {
-				// Defensive: out-of-range index. Ignore rather than panic.
-				continue
-			}
-			c.compileTrack(trackIdx)
+			c.compileSlot(req)
 		}
 	}
 }
 
-// compileTrack renders the given track's currently-queued pattern spec into
-// a fresh CompiledPattern and publishes it into nextEvents[trackIdx]. The
-// editCounter observed at the start of compile is stamped onto the result so
-// the wrap handler can detect stale events.
-func (c *Compiler) compileTrack(trackIdx int) {
-	track := c.project.Tracks[trackIdx]
+// compileSlot renders one Machine slot for one pattern on one track. Holds
+// the track's RLock for the duration — InputManager's writes briefly block
+// compiles, which is fine because writes are sub-millisecond.
+func (c *Compiler) compileSlot(req model.CompileRequest) {
+	if req.Track < 0 || req.Track >= 8 {
+		return
+	}
+	if req.Pattern < 0 || req.Pattern >= devices.NumPatterns {
+		return
+	}
+	if req.Slot < 0 || req.Slot > 1 {
+		return
+	}
+	track := c.project.Tracks[req.Track]
 	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
 
-	// Record the editCounter BEFORE compile. If it advances during compile,
-	// the resulting pattern will already be stale on publish — the next
-	// compile signal should already be queued (InputManager increments then
-	// sends on compileCh). We stamp the observed counter so playback's wrap
-	// handler can detect the stale-ness either way.
-	edit := c.editCounters[trackIdx].Load()
-
-	// Fresh seed per compile. Per DESIGN §7: nanosecond clock XOR'd with
-	// trackIdx and a monotonic counter so two compiles at the same wall-clock
-	// nanosecond still get distinct seeds.
-	seed := uint64(time.Now().UnixNano()) ^ uint64(trackIdx) ^ c.loopCounter.Add(1)
-
 	track.RLock()
+	defer track.RUnlock()
+
+	// Per-slot fresh seed. Mixes wall clock, the (track, pattern, slot)
+	// triple, and a monotonic counter so simultaneous compiles on the same
+	// nanosecond get distinct rolls. Odd-looking mix of XOR and multiply-
+	// by-small-primes is intentional: it keeps the slot/track component in
+	// the low bits where the rng consumes them first.
+	seed := uint64(time.Now().UnixNano()) ^
+		uint64(req.Track)*31 ^
+		uint64(req.Pattern)*7 ^
+		uint64(req.Slot) ^
+		c.loopCounter.Add(1)
+
 	var cp devices.CompiledPattern
+	var machine *[2]atomic.Pointer[devices.CompiledPattern]
+
 	switch track.Type {
 	case model.DeviceDrum:
 		if track.Drum == nil {
-			track.RUnlock()
 			return
 		}
-		kit := devices.GetKit(track.Kit)
-		cp = drum.Compile(track.Drum, kit, seed)
+		pat := track.Drum.Patterns[req.Pattern]
+		if pat == nil {
+			return
+		}
+		cp = drum.Compile(pat, devices.GetKit(track.Kit), seed)
+		machine = &pat.Machine
 	case model.DevicePiano:
 		if track.Piano == nil {
-			track.RUnlock()
 			return
 		}
-		cp = piano.Compile(track.Piano, seed)
+		pat := track.Piano.Patterns[req.Pattern]
+		if pat == nil {
+			return
+		}
+		cp = piano.Compile(pat, seed)
+		machine = &pat.Machine
 	case model.DeviceMetropolix:
 		if track.Metropolix == nil {
-			track.RUnlock()
 			return
 		}
-		cp = metropolix.Compile(track.Metropolix, seed)
+		pat := track.Metropolix.Patterns[req.Pattern]
+		if pat == nil {
+			return
+		}
+		cp = metropolix.Compile(pat, seed)
+		machine = &pat.Machine
 	default:
-		track.RUnlock()
 		return
 	}
-	track.RUnlock()
 
-	cp.EditCounter = edit
-	c.nextEvents[trackIdx].Store(&cp)
+	machine[req.Slot].Store(&cp)
 
-	debug.Log("compile", "track=%d seed=%d events=%d len=%d edit=%d",
-		trackIdx, seed, len(cp.Events), cp.Length, edit)
+	debug.Log("compile", "track=%d pattern=%d slot=%d seed=%d events=%d len=%d",
+		req.Track, req.Pattern, req.Slot, seed, len(cp.Events), cp.Length)
 }

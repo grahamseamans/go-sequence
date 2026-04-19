@@ -175,10 +175,11 @@ func (s *Save) HandleKey(project *model.Project, ops SaveOps, out midi.ToExterna
 			s.Refresh(ops)
 			return
 		}
-		// Swap the project contents in place. InputManager holds the same
-		// *model.Project pointer the rest of the system reads from, so we
-		// must not replace the pointer — only its contents.
-		*project = *loaded
+		// Swap the project's persisted fields in place. InputManager holds
+		// the same *model.Project pointer the rest of the system reads from,
+		// so we mustn't replace the pointer. Runtime state (PlaybackState)
+		// stays put because it contains atomics that can't be copied.
+		project.ReplacePersisted(loaded)
 		project.Validate()
 		s.Refresh(ops)
 	case "s":

@@ -61,31 +61,28 @@ const (
 // old pianoroll's hard floor to avoid zero-length notes.
 const minNoteDurationBeats = 0.25
 
-// Compile renders the currently-playing piano pattern into a CompiledPattern.
+// Compile renders a single piano pattern into a CompiledPattern.
 //
-// Pure: no I/O, no mutation of spec, no globals. Same (spec, seed) → same
-// output.
+// Pure: no I/O, no mutation of spec, no globals. Same (pattern, seed) →
+// same output. The caller (Compiler goroutine) picks which pattern to
+// render — the Schedule.Playing indirection no longer lives here.
 //
 // Tick math: note.Start and note.Duration are beats (float64); PPQ=960 gives
 // `tick = int64(beat * PPQ)`. Off-ticks that extend past the pattern end are
 // clamped to `length - 1` (matches drum.go's boundary convention); the loop
 // wrap will then send the NoteOff slightly before the NoteOn on the next
 // iteration, which is the intended short-tail behavior.
-func Compile(spec *devices.Piano, seed uint64) devices.CompiledPattern {
+func Compile(pat *devices.PianoPattern, seed uint64) devices.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Piano currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
 	// TODO(probability): use r when per-note probability lands.
 	_ = rng.NewRng(seed)
 
-	playingIdx := spec.Schedule.Playing
-	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
-		// Validate() normally guarantees this; be defensive with length 1 to
-		// keep the walker's modular math safe.
+	if pat == nil {
 		return devices.CompiledPattern{Length: 1}
 	}
 
-	pat := &spec.Patterns[playingIdx]
 	length := int64(pat.Length * float64(devices.PPQ))
 	if length < 1 {
 		length = 1
@@ -138,7 +135,6 @@ func Compile(spec *devices.Piano, seed uint64) devices.CompiledPattern {
 		return events[i].Tick < events[j].Tick
 	})
 
-	// EditCounter is stamped by the Compiler goroutine after Compile returns.
 	return devices.CompiledPattern{
 		Events: events,
 		Length: length,
@@ -167,7 +163,7 @@ func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, 
 		return
 	}
 	state := track.Piano
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 
 	basePitch := int(state.CenterPitch) - 4
 	viewScale := pianoViewScale(state.ViewScale)
@@ -221,7 +217,7 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 		return
 	}
 	state := track.Piano
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	editH := pianoEditHoriz(state.EditHoriz)
 	editV := pianoEditVert(state.EditVert)
 
@@ -382,7 +378,7 @@ func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 		return
 	}
 
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	dur := pianoEditHoriz(state.EditHoriz) * 4
 	if dur < minNoteDurationBeats {
 		dur = minNoteDurationBeats
@@ -547,7 +543,7 @@ func clearPianoPattern(pat *devices.PianoPattern) {
 
 // centerPianoOnSelection scrolls the viewport to show the selected note.
 func centerPianoOnSelection(state *devices.Piano) {
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	if state.SelectedNote < 0 || state.SelectedNote >= len(pat.Notes) {
 		return
 	}
@@ -559,7 +555,7 @@ func centerPianoOnSelection(state *devices.Piano) {
 // selectPianoNoteByTime moves SelectedNote forward/backward through the
 // time-sorted note list, wrapping at the ends.
 func selectPianoNoteByTime(state *devices.Piano, direction int) {
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	if len(pat.Notes) == 0 {
 		return
 	}
@@ -576,7 +572,7 @@ func selectPianoNoteByTime(state *devices.Piano, direction int) {
 // note at each pitch step. Ports the old "jump to closest at next pitch"
 // heuristic from sequencer/pianoroll.go.
 func selectPianoNoteByPitch(state *devices.Piano, direction int) {
-	pat := &state.Patterns[state.EditingPatternIdx]
+	pat := state.Patterns[state.EditingPatternIdx]
 	if len(pat.Notes) == 0 {
 		return
 	}

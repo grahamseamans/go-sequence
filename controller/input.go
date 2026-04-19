@@ -3,16 +3,16 @@
 //
 // InputManager fans in events from three sources and dispatches them:
 //
-//   1. Pad events from the Launchpad (surface.PadEvents()).
-//   2. Keyboard events from the TUI, delivered synchronously via HandleKey.
-//   3. Per-track MIDI-in, one goroutine per track subscribed to the track's
-//      configured (PortName, Channel).
+//  1. Pad events from the Launchpad (surface.PadEvents()).
+//  2. Keyboard events from the TUI, delivered synchronously via HandleKey.
+//  3. Per-track MIDI-in, one goroutine per track subscribed to the track's
+//     configured (PortName, Channel).
 //
 // All writes to model state (specs, schedules, transport-adjacent fields)
 // flow through InputManager. It's also the single source that decides when
-// a track's compiled events are stale and need regenerating: on mutation,
-// it bumps the track's editCounter (on PlaybackEngine) and non-blocking
-// sends the trackIdx on compileCh.
+// a pattern's Machine slots are stale: on mutation it nils both slots and
+// non-blocking-sends TWO CompileRequests (one per slot) on compileCh. The
+// compile goroutine then renders a fresh CompiledPattern into each slot.
 //
 // Concurrency shape (DESIGN §6):
 //
@@ -33,7 +33,6 @@ package controller
 
 import (
 	"context"
-	"sync/atomic"
 
 	"go-sequence/controller/devices/drum"
 	"go-sequence/controller/devices/empty"
@@ -46,6 +45,7 @@ import (
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // FocusKind tags which UI context input is routed to. Per DESIGN §4.8 focus
@@ -75,8 +75,7 @@ type InputManager struct {
 	in      midi.FromExternal
 	surface surface.Surface
 
-	compileCh    chan<- int
-	editCounters *[8]atomic.Uint64
+	compileCh chan<- model.CompileRequest
 
 	// Focus state. Mutated only by InputManager (Run's select loop + the view
 	// goroutine via HandleKey). Read by view via Focused() as a value copy.
@@ -102,20 +101,19 @@ func NewInputManager(
 	out midi.ToExternal,
 	in midi.FromExternal,
 	surf surface.Surface,
-	compileCh chan<- int,
+	compileCh chan<- model.CompileRequest,
 	saveOps save.SaveOps,
 ) *InputManager {
 	return &InputManager{
-		project:      project,
-		pe:           pe,
-		out:          out,
-		in:           in,
-		surface:      surf,
-		compileCh:    compileCh,
-		editCounters: pe.EditCounters(),
-		focused:      FocusTarget{Kind: FocusTrack, Track: 0},
-		save:         &save.Save{},
-		saveOps:      saveOps,
+		project:   project,
+		pe:        pe,
+		out:       out,
+		in:        in,
+		surface:   surf,
+		compileCh: compileCh,
+		focused:   FocusTarget{Kind: FocusTrack, Track: 0},
+		save:      &save.Save{},
+		saveOps:   saveOps,
 	}
 }
 
@@ -207,7 +205,9 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 
 	case FocusSession:
 		// Session mutates Schedule.Queued on project.Tracks[ev.Row]. Lock
-		// THAT track (not the currently-focused track) and bump its counter.
+		// THAT track (not the currently-focused track). The "dirty" pattern
+		// is the queued column itself — mark it so its Machine slots are
+		// ready by the time playback wraps into it.
 		if ev.Row < 0 || ev.Row >= 8 {
 			return
 		}
@@ -220,7 +220,8 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 			tgt.Unlock()
 		}
 		if ev.Down {
-			im.markTrackDirty(ev.Row)
+			// ev.Col is the queued pattern index; see session.HandlePad.
+			im.markPatternDirty(ev.Row, ev.Col)
 		}
 
 	case FocusSettings:
@@ -365,29 +366,137 @@ func (im *InputManager) HandleKey(key string) {
 		im.save.HandleKey(im.project, im.saveOps, im.out, key)
 		if wasLoad {
 			// Project contents may have been replaced. Per DESIGN §4.5: stop
-			// playback and recompile every track so current_events and
-			// next_events don't reference stale specs.
+			// playback and recompile every track's currently-playing
+			// pattern so playback has something to read on Play.
 			im.pe.Pause()
 			im.pe.ResetCursors()
 			for i := 0; i < 8; i++ {
-				im.markTrackDirty(i)
+				im.markPlayingDirty(i)
 			}
 		}
 	}
 }
 
-// markTrackDirty increments the track's edit counter and non-blocking sends
-// on compileCh. The counter bump MUST precede the channel send so that if
-// the compiler is already draining the channel, the increment is visible by
-// the time compileTrack reads editCounters[i].
+// markTrackDirty trashes both Machine slots of the edited pattern on the
+// named track and signals the compiler to refill them. The "edited pattern"
+// is resolved from the device's EditingPatternIdx for device handlers, or
+// from the just-queued pattern for session handlers — we pass the pattern
+// index in explicitly via markPatternDirty below.
+//
+// This wrapper figures out the editing pattern for the focused-device case,
+// which is what the pad/key/midi handlers want.
 func (im *InputManager) markTrackDirty(trackIdx int) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return
 	}
-	im.editCounters[trackIdx].Add(1)
-	select {
-	case im.compileCh <- trackIdx:
+	track := im.project.Tracks[trackIdx]
+	if track == nil || track.Type == model.DeviceNone {
+		return
+	}
+	var patternIdx int
+	switch track.Type {
+	case model.DeviceDrum:
+		if track.Drum == nil {
+			return
+		}
+		patternIdx = track.Drum.EditingPatternIdx
+	case model.DevicePiano:
+		if track.Piano == nil {
+			return
+		}
+		patternIdx = track.Piano.EditingPatternIdx
+	case model.DeviceMetropolix:
+		if track.Metropolix == nil {
+			return
+		}
+		patternIdx = track.Metropolix.EditingPatternIdx
 	default:
-		debug.Log("input", "compileCh full, dropping compile request for track=%d", trackIdx)
+		return
+	}
+	im.markPatternDirty(trackIdx, patternIdx)
+}
+
+// markPlayingDirty is like markTrackDirty but targets the currently-playing
+// pattern (Schedule.Playing) rather than the editing one. Used after project
+// load to prime the Machine slots playback will read from.
+func (im *InputManager) markPlayingDirty(trackIdx int) {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return
+	}
+	track := im.project.Tracks[trackIdx]
+	if track == nil || track.Type == model.DeviceNone {
+		return
+	}
+	var patternIdx int
+	switch track.Type {
+	case model.DeviceDrum:
+		if track.Drum == nil {
+			return
+		}
+		patternIdx = track.Drum.Schedule.Playing
+	case model.DevicePiano:
+		if track.Piano == nil {
+			return
+		}
+		patternIdx = track.Piano.Schedule.Playing
+	case model.DeviceMetropolix:
+		if track.Metropolix == nil {
+			return
+		}
+		patternIdx = track.Metropolix.Schedule.Playing
+	default:
+		return
+	}
+	im.markPatternDirty(trackIdx, patternIdx)
+}
+
+// markPatternDirty trashes both Machine slots of the named pattern on the
+// named track, then non-blocking-sends ONE CompileRequest per slot so the
+// compiler refills them with fresh rolls. Used by session (queue-change)
+// and device handlers (spec edits).
+//
+// Trashing before sending is load-bearing: the nil-store MUST be visible
+// before playback reads the slot — atomic.Store provides the needed
+// publish semantics. (Compile unconditionally overwrites the slot, so the
+// nil isn't strictly needed for compile's correctness, but playback
+// observing a stale cached CompiledPattern between the edit and the
+// compile completing would briefly emit wrong events. The nil makes
+// playback silent for that window instead.)
+func (im *InputManager) markPatternDirty(trackIdx, patternIdx int) {
+	if trackIdx < 0 || trackIdx >= 8 {
+		return
+	}
+	if patternIdx < 0 || patternIdx >= devices.NumPatterns {
+		return
+	}
+	track := im.project.Tracks[trackIdx]
+	if track == nil {
+		return
+	}
+	switch track.Type {
+	case model.DeviceDrum:
+		if track.Drum != nil && track.Drum.Patterns[patternIdx] != nil {
+			track.Drum.Patterns[patternIdx].Machine[0].Store(nil)
+			track.Drum.Patterns[patternIdx].Machine[1].Store(nil)
+		}
+	case model.DevicePiano:
+		if track.Piano != nil && track.Piano.Patterns[patternIdx] != nil {
+			track.Piano.Patterns[patternIdx].Machine[0].Store(nil)
+			track.Piano.Patterns[patternIdx].Machine[1].Store(nil)
+		}
+	case model.DeviceMetropolix:
+		if track.Metropolix != nil && track.Metropolix.Patterns[patternIdx] != nil {
+			track.Metropolix.Patterns[patternIdx].Machine[0].Store(nil)
+			track.Metropolix.Patterns[patternIdx].Machine[1].Store(nil)
+		}
+	default:
+		return
+	}
+	for slot := 0; slot < 2; slot++ {
+		select {
+		case im.compileCh <- model.CompileRequest{Track: trackIdx, Pattern: patternIdx, Slot: slot}:
+		default:
+			debug.Log("input", "compileCh full, dropping compile request for track=%d pattern=%d slot=%d", trackIdx, patternIdx, slot)
+		}
 	}
 }

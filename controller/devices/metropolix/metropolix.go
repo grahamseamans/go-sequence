@@ -81,8 +81,9 @@ var scaleIntervals = map[devices.ScaleType][]int{
 	devices.ScaleBhairavi:         {0, 1, 3, 5, 7, 8, 10, 12},
 }
 
-// Compile renders the currently-playing Metropolix pattern into a
-// CompiledPattern: one full loop of TimedEvents. Pure function of (spec, seed).
+// Compile renders a single Metropolix pattern into a CompiledPattern: one
+// full loop of TimedEvents. Pure function of (pattern, seed). The caller
+// (Compiler goroutine) picks which pattern to render.
 //
 // Walk order depends on pat.Mode. Accumulator state is LOCAL to this call —
 // the spec is never mutated. Per the Grok design review: accumulators start at
@@ -91,14 +92,12 @@ var scaleIntervals = map[devices.ScaleType][]int{
 // Probability is rolled ONCE per stage. If it fails, the stage emits nothing
 // (no note, no ratchets). Ratchets within a gated stage all play — they share
 // the stage's single probability outcome.
-func Compile(spec *devices.Metropolix, seed uint64) devices.CompiledPattern {
+func Compile(pat *devices.MetropolixPattern, seed uint64) devices.CompiledPattern {
 	prng := rng.NewRng(seed)
 
-	playingIdx := spec.Schedule.Playing
-	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
+	if pat == nil {
 		return devices.CompiledPattern{Length: 1}
 	}
-	pat := &spec.Patterns[playingIdx]
 
 	// Clamp pat.Length defensively. Validate() normally guarantees 1..8.
 	patLen := pat.Length
@@ -425,7 +424,7 @@ func HandlePad(track *model.Track, project *model.Project, out midi.ToExternal, 
 	}
 
 	// Main grid: page-specific handler.
-	pat := &spec.Patterns[spec.EditingPatternIdx]
+	pat := spec.Patterns[spec.EditingPatternIdx]
 	switch spec.Page {
 	case mxPageSettings:
 		handleSettingsPad(spec, pat, row, col)
@@ -538,7 +537,7 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 		return
 	}
 	spec := track.Metropolix
-	pat := &spec.Patterns[spec.EditingPatternIdx]
+	pat := spec.Patterns[spec.EditingPatternIdx]
 
 	// Clamp selected defensively in case Length shrunk on load.
 	if spec.Selected >= pat.Length {

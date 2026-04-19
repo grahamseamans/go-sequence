@@ -10,8 +10,8 @@ import (
 
 // HandlePad / HandleKey / HandleMIDI — no-ops. The track has no device to drive.
 func HandlePad(project *model.Project, out midi.ToExternal, row, col int, down bool) {}
-func HandleKey(project *model.Project, out midi.ToExternal, key string)             {}
-func HandleMIDI(project *model.Project, out midi.ToExternal, ev midi.Event)         {}
+func HandleKey(project *model.Project, out midi.ToExternal, key string)              {}
+func HandleMIDI(project *model.Project, out midi.ToExternal, ev midi.Event)          {}
 
 // Render returns empty content — nothing to draw.
 // TODO: step 5 wires view/, this may need a "no device" placeholder message.

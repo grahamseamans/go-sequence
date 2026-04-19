@@ -18,12 +18,13 @@ const (
 	DeviceMetropolix DeviceKind = "Metropolix"
 )
 
-// Project is the entire persisted state of a go-sequence project. Pure data.
-// Runtime state (Transport, Tick, Playing, compiled events) lives in the
-// PlaybackEngine and is NOT persisted here.
+// Project is the entire persisted state of a go-sequence project, plus its
+// runtime state. Persisted fields carry JSON tags; Playback is runtime only
+// and never written to disk.
 type Project struct {
-	Tempo  int       `json:"tempo"`
-	Tracks [8]*Track `json:"tracks"`
+	Tempo    int           `json:"tempo"`
+	Tracks   [8]*Track     `json:"tracks"`
+	Playback PlaybackState `json:"-"`
 }
 
 // Track is one of the project's eight tracks. Exactly one of Drum/Piano/
@@ -31,14 +32,14 @@ type Project struct {
 // Type == DeviceNone. mu guards the track's spec fields against concurrent
 // reads (Compiler, View) and writes (InputManager).
 type Track struct {
-	Name       string       `json:"name"`
-	Channel    uint8        `json:"channel"`
-	PortName   string       `json:"portName,omitempty"`
-	Type       DeviceKind   `json:"type"`
-	Kit        string       `json:"kit,omitempty"`
-	Muted      bool         `json:"muted"`
-	Solo       bool         `json:"solo"`
-	mu         sync.RWMutex `json:"-"`
+	Name       string              `json:"name"`
+	Channel    uint8               `json:"channel"`
+	PortName   string              `json:"portName,omitempty"`
+	Type       DeviceKind          `json:"type"`
+	Kit        string              `json:"kit,omitempty"`
+	Muted      bool                `json:"muted"`
+	Solo       bool                `json:"solo"`
+	mu         sync.RWMutex        `json:"-"`
 	Drum       *devices.Drum       `json:"drum,omitempty"`
 	Piano      *devices.Piano      `json:"piano,omitempty"`
 	Metropolix *devices.Metropolix `json:"metropolix,omitempty"`
@@ -69,6 +70,19 @@ func New() *Project {
 		}
 	}
 	return p
+}
+
+// ReplacePersisted copies the persisted fields (Tempo, Tracks) from src into
+// p in place, leaving the runtime PlaybackState untouched. Used on project
+// load so the rest of the system (which holds *p) keeps seeing the same
+// pointer — and so vet doesn't flag a value-copy over atomic.Bool in
+// PlaybackState.
+func (p *Project) ReplacePersisted(src *Project) {
+	if src == nil {
+		return
+	}
+	p.Tempo = src.Tempo
+	p.Tracks = src.Tracks
 }
 
 // Validate clamps every field of the project into a known-good range and
