@@ -197,8 +197,13 @@ if that's longer than the pattern you're done with it
 
 
 
+all state goes in model.
 
 
 views call the compile too, they edit the model, and then say, hey dude, i just edited it, you need to now remake those patterns.
 The fucked thing is that, it needs to actually replace the pattern that the playack engine is reading from (and the other machine pattern)
 this is why we dont store the playhead itself, and calculate it each time for each pattern instead.
+
+when the compiler thing is doing it, and it's making both of those things, it can do it one at a time, you're saying (from the pattern compiler routine) lets use device x's compiler to remake human pattern to replace the machine pattern with id a.
+
+When the view changes the human readable part of the ting, it just goes, for human pattern x, use that type of compiler (i find the right one as the view) and use it to recopmile both of the patterns and put them in there for the playhead.
