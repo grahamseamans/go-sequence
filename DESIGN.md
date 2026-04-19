@@ -61,11 +61,11 @@ MIDI I/O, Control Surface, and Save/Load all live inside Controller. They're cap
 
 1. **Model is pure data.** No behavior, no I/O. Just structs, JSON tags, and `Validate()` methods that clamp fields to valid ranges.
 
-2. **Device types have no fields.** `var Drum devices.Drum` is a value-singleton with only methods. The methods are of two kinds:
+2. **Device types have no fields and no lock awareness.** `var Drum devices.Drum` is a value-singleton with only methods. The methods are of two kinds:
    - **Compile** is pure: `Compile(human *model.DrumHuman) *model.MachinePattern`. Same input → same output. No side effects.
-   - **HandlePad / HandleKey / HandleMIDI** are impure: they mutate the state slice passed to them, may send preview MIDI, may call Compile to refresh the machine pattern.
+   - **HandlePad / HandleKey / HandleMIDI** are impure: they mutate the state slice passed to them, may send preview MIDI, may call Compile. They never acquire locks themselves.
 
-3. **Input handlers mutate state under a per-track mutex, then recompile.** Step toggle → acquire track mutex → mutate `Human.Notes` → call `devices.Drum.Compile(&human)` → assign new `Events` slice → release mutex. Transport / schedule changes don't need compilation; playback engine reads them directly.
+3. **InputManager owns all writer-side locking.** It's the sole writer in the system, so it owns the lock. Before calling any device handler, it acquires the appropriate per-track mutex; after the handler returns, it releases. Devices stay focused on *what* to do; InputManager controls *when it's safe to write*.
 
 4. **Playback engine is a tape head.** Every tick: read transport → read schedule → read cursor → read current pattern's machine form → dispatch events. All reads.
 
@@ -114,15 +114,17 @@ No compilation. No regeneration. Pure walk + dispatch.
 
 ```
 pad press → surface → InputManager.HandlePad(row, col)
+  → InputManager acquires state.mu.Lock()           // writer owns the lock
   → InputManager calls focused device: devices.Drum.HandlePad(state, project, ports, row, col)
-    → device acquires state.mu.Lock()
     → device mutates state.Patterns[N].Human (e.g., Notes[lane].Steps[step].Active = true)
     → device recompiles: state.Patterns[N].Machine = devices.Drum.Compile(&state.Patterns[N].Human)
-    → device releases state.mu.Unlock()
-    → return
+    → return                                        // device never touches the lock
+  → InputManager releases state.mu.Unlock()
 ```
 
 PlaybackEngine reads the new machine pattern from the next tick onward (RLock, grab events slice header, RUnlock, walk).
+
+Note: preview-only handler calls (no state mutation) still get wrapped in Lock/Unlock for uniformity. Cost is sub-microsecond. If this ever shows up as a hot path, devices can split into separate `HandlePadMutating` / `HandlePadPreview` methods so InputManager only locks the mutating path.
 
 ### 4.3 Transport / schedule change (no compile)
 
@@ -390,8 +392,10 @@ Goroutines share `*model.Project`:
 | InputManager.Run                | surface pad events                         | patterns (atomic swap via device Compile), spec, Schedule.Queued, transport |
 | InputManager.HandleKey (view)   | everything                                 | same as InputManager.Run                         |
 
-- **Per-track `sync.RWMutex`** on each device state (Drum, Piano, Metropolix). Guards Patterns (both Human and Machine.Events) and Schedule. Tick takes RLock briefly each iteration to grab a consistent snapshot of events slice header + schedule values; walks events without lock (slice backing array immutable — input replaces, never mutates in place).
-- **Schedule boundary promotion**: PlaybackEngine takes a brief Lock to promote `Queued → Playing`. User queueing takes the same Lock to set `Queued`. Whoever gets the lock first runs; user's queue is always honored on the next boundary after they set it.
+- **Per-track `sync.RWMutex`** on each device state (Drum, Piano, Metropolix). Guards Patterns (both Human and Machine.Events) and Schedule. **All Lock/Unlock calls are made by InputManager (writer side) or PlaybackEngine (boundary promotion only).** Devices themselves are lock-unaware.
+- **Tick read path**: PlaybackEngine takes RLock briefly each iteration to grab a consistent snapshot of the events slice header + schedule values; walks events without lock (slice backing array immutable — input replaces, never mutates in place).
+- **Input write path**: InputManager Lock → call device handler (mutates state, may call Compile) → Unlock. Devices never touch the lock.
+- **Schedule boundary promotion**: PlaybackEngine takes a brief Lock to promote `Queued → Playing`. The only place PlaybackEngine writes anything other than its own cursors. User queueing (via InputManager) takes the same Lock to set `Queued`. Whoever gets the lock first runs; user's queue is always honored on the next boundary after they set it.
 - **Cursors**: owned by PlaybackEngine. Not shared, no lock needed.
 - **Project.Tick, Project.Transport.Playing**: `atomic.Int64` and `atomic.Bool`.
 - **Project pointer swap (load)**: only happens when Transport.Playing == false, so no concurrent tick reads. Simple pointer assignment.
