@@ -42,6 +42,7 @@ Three top-level chunks. MIDI I/O and Control Surface live *inside* Controller be
 - **Devices are pure Controllers. They have no state.** They take input, read from Model, mutate Model, emit MIDI events. The `DrumState` struct lives in `model/`; the `DrumDevice` (in `controller/devices/`) is just behavior that operates on it. They share a name by naming convention, not by ownership.
 - **Test at module boundaries**, not internals. Each chunk gets `*_test.go` exercising the public API. Mock implementations (MockSurface, fake MIDI port) let the engine run end-to-end with no hardware.
 - **Data flow**: Inputs (clock, keyboard via View, pads via Surface, MIDI in) → Controller → Model mutations → Views (screen, LEDs, MIDI out).
+- **Naming**: Same domain name in both packages, role conveyed by package path. `model.Drum` is the data, `controller/devices.Drum` is the behavior. No `Device`/`State`/`Controller` suffixes — Go's anti-stutter convention plus our packages already say what role each type plays. Reads as `func (d *devices.Drum) Tick(state *model.Drum) []midi.Event`.
 
 ## Audit punch list
 
