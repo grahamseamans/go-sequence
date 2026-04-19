@@ -11,17 +11,15 @@ import (
 // §3.2 — "Model owns ALL state", the persisted/runtime distinction is
 // just a JSON tag.
 
-// Cursor is a per-track playback position within its currently-playing
-// pattern. The dual-buffer now lives PER HUMAN PATTERN (pattern.Machine),
-// so the cursor carries which slot (0 or 1) playback is reading, plus the
-// tick-within-pattern of the last event emission for the bound-the-window
-// pass on each tick. T0 anchors the currently-playing pattern's start to
-// wall-clock time so pattern position can be derived without advancing a
-// stored playhead mid-tick.
+// Cursor is the per-track playback anchor. The playhead itself is NOT
+// stored — it's computed every tick as (globalTick - T0Tick), per DESIGN
+// ("we dont store the playhead itself, and calculate it each time for
+// each pattern instead"). The cursor only stores WHEN the currently-
+// playing pattern started (in global ticks) and which Machine slot of
+// that pattern playback is reading.
 type Cursor struct {
-	T0           time.Time // wall-clock anchor at which the current pattern started
-	CurrentSlot  int       // 0 or 1 — which Machine slot playback is reading
-	LastPosition int64     // ticks-within-current-pattern of the last emission
+	T0Tick      int64 // global tick at which the current pattern started playing
+	CurrentSlot int   // 0 or 1 — which Machine slot playback is reading
 }
 
 // FocusKind selects which domain is active in the UI.

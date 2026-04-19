@@ -18,18 +18,17 @@ import (
 const MaxDeltaTicks = int64(devices.PPQ) // 1 quarter note
 
 // tickSleep is the granularity at which the tick goroutine wakes up to check
-// whether a tick boundary has elapsed. It is small enough to keep jitter under
-// a millisecond at 120 BPM (tick interval ~520µs at PPQ=960) while still
-// letting the goroutine yield cleanly.
+// whether a tick boundary has elapsed. Small enough to keep jitter sub-ms at
+// 120 BPM (tick interval ~520µs at PPQ=960) while letting the goroutine yield.
 const tickSleep = 250 * time.Microsecond
 
-// PlaybackEngine walks pre-compiled events with a cursor. Transport state
-// (playing, t0, tick) lives here; per-track cursors live on project.Playback.
+// PlaybackEngine is the transport + per-track cursor walker. Event storage
+// lives on each pattern's Machine[2]atomic.Pointer dual-buffer; PlaybackEngine
+// holds nothing except the transport anchor.
 //
-// Event storage no longer sits on PlaybackEngine: each pattern owns its own
-// Machine[2]atomic.Pointer dual-buffer. The cursor's CurrentSlot names which
-// one playback is reading; on wrap we store nil into the consumed slot, flip
-// the cursor, and signal compile to refill that slot.
+// Per DESIGN, the playhead itself is NOT stored. On each tick it is
+// recomputed as (globalTick - cursor.T0Tick), giving the pattern-relative
+// position without needing a separately-advanced cursor.
 type PlaybackEngine struct {
 	project   *model.Project
 	out       midi.ToExternal
@@ -37,16 +36,15 @@ type PlaybackEngine struct {
 
 	// Transport.
 	playing        atomic.Bool
-	tick           atomic.Int64 // global tick count since last Play()
-	lastGlobalTick atomic.Int64 // previous globalTick; computes delta per tick
+	tick           atomic.Int64 // global tick count (latest value passed to processTick)
+	lastGlobalTick atomic.Int64 // previous globalTick; paired with per-track T0Tick to compute lastPos
 	t0Mu           sync.RWMutex
 	t0             time.Time    // wall-clock anchor; reads/writes guarded by t0Mu
 	tempo          atomic.Int64 // BPM as int, read by tick goroutine each iteration
 }
 
 // NewPlaybackEngine constructs a PlaybackEngine bound to the given project,
-// MIDI output, and compile-request channel. The engine does not start
-// walking until Run is invoked.
+// MIDI output, and compile-request channel.
 func NewPlaybackEngine(project *model.Project, out midi.ToExternal, compileCh chan<- model.CompileRequest) *PlaybackEngine {
 	pe := &PlaybackEngine{
 		project:   project,
@@ -60,8 +58,7 @@ func NewPlaybackEngine(project *model.Project, out midi.ToExternal, compileCh ch
 	return pe
 }
 
-// Run starts the tick goroutine. Blocks until ctx is done. Should be called
-// from its own goroutine in main.
+// Run starts the tick goroutine. Blocks until ctx is done.
 func (pe *PlaybackEngine) Run(ctx context.Context) {
 	for {
 		select {
@@ -70,11 +67,6 @@ func (pe *PlaybackEngine) Run(ctx context.Context) {
 		default:
 		}
 
-		// Sleep a short fixed slice. We do NOT use time.Ticker because the
-		// tick interval is derived from tempo, which can change mid-play.
-		// A fixed short sleep keeps the loop responsive to tempo changes
-		// while still tracking tick boundaries precisely via the wall-clock
-		// anchor t0.
 		time.Sleep(tickSleep)
 
 		if !pe.playing.Load() {
@@ -83,7 +75,6 @@ func (pe *PlaybackEngine) Run(ctx context.Context) {
 
 		interval := tickInterval(pe.tempo.Load())
 		if interval <= 0 {
-			// Defensive: bad tempo means no ticks advance (equivalent to pause).
 			continue
 		}
 
@@ -100,29 +91,34 @@ func (pe *PlaybackEngine) Run(ctx context.Context) {
 }
 
 // tickInterval returns the wall-clock duration of a single tick at the given
-// tempo. Guards against non-positive BPM (returns 0, which Run treats as
-// "don't advance").
+// tempo. Returns 0 if bpm is non-positive (treated as "don't advance").
 func tickInterval(bpm int64) time.Duration {
 	if bpm <= 0 {
 		return 0
 	}
-	// 60 seconds per minute * 1e9 ns/s / (bpm * PPQ) ticks per minute
 	return time.Duration(60e9 / (bpm * int64(devices.PPQ)))
 }
 
 // processTick walks each track, reads its currently-playing pattern's
-// Machine[CurrentSlot] buffer, and dispatches any events that fall in
-// (LastPosition, newPos]. On wrap, splits the window at the pattern
-// boundary, rotates slots / queued patterns, and dispatches the remainder
-// against the NEW pattern's new slot.
+// Machine[CurrentSlot], and dispatches events whose pattern-relative tick
+// falls in (lastPos, newPos].
+//
+// lastPos and newPos are both computed from globalTick / lastGlobalTick and
+// the per-track T0Tick — the playhead itself is never stored.
+//
+// On wrap (newPos crosses pattern.Length), the window is split: the tail of
+// the old pattern/slot is emitted, handleWrap rotates slots and promotes any
+// queued pattern, and the remainder is emitted against the new slot.
 func (pe *PlaybackEngine) processTick(globalTick int64) {
-	delta := globalTick - pe.lastGlobalTick.Load()
+	lastGlobal := pe.lastGlobalTick.Load()
+	delta := globalTick - lastGlobal
 	if delta > MaxDeltaTicks {
+		// Clock jumped; clamp to one tick. Per-track math still works
+		// because we synthesize lastGlobal = globalTick - delta below.
 		delta = 1
+		lastGlobal = globalTick - 1
 	}
 	if delta < 0 {
-		// Defensive: shouldn't happen, but if the clock went backwards we
-		// treat it as a no-op advance rather than a huge negative walk.
 		delta = 0
 	}
 
@@ -134,90 +130,77 @@ func (pe *PlaybackEngine) processTick(globalTick int64) {
 
 		cursor := &pe.project.Playback.Cursors[i]
 
-		// Resolve the currently-playing pattern index + its Machine slot.
 		curPatternIdx, machine := pe.resolveCurrent(track, i)
 		if machine == nil {
-			// Not yet compiled. Request this slot and stay silent this tick.
-			// Playback resumes as soon as compile publishes the slot.
+			// Slot isn't compiled yet. Request it; stay silent this tick.
 			pe.requestCompile(i, curPatternIdx, cursor.CurrentSlot)
 			continue
 		}
-
 		plen := machine.Length
 		if plen < 1 {
 			plen = 1
 		}
 
-		// Clamp LastPosition in case the pattern length shrank under us
-		// since the cursor was last written (user shortened pat.Length).
-		if cursor.LastPosition < 0 || cursor.LastPosition >= plen {
-			cursor.LastPosition = ((cursor.LastPosition % plen) + plen) % plen
-		}
+		// Pattern-relative positions derived from globalTick + T0Tick.
+		// lastPos can be negative on the first tick after Play (we init
+		// lastGlobalTick = -1 so tick 0 falls in the (−1, 0] window).
+		lastPos := lastGlobal - cursor.T0Tick
+		newPos := globalTick - cursor.T0Tick
 
 		if delta == 0 {
 			continue
 		}
 
-		newPos := cursor.LastPosition + delta
-
 		if newPos < plen {
-			// No wrap — emit events in (LastPosition, newPos].
+			// No wrap — fire events in (lastPos, newPos].
 			for _, ev := range machine.Events {
-				if ev.Tick > cursor.LastPosition && ev.Tick <= newPos {
+				if ev.Tick > lastPos && ev.Tick <= newPos {
 					pe.dispatch(track, ev)
 				}
 			}
-			cursor.LastPosition = newPos
 			continue
 		}
 
-		// Wrap. First finish out the old slot: (LastPosition, plen).
-		// Events sit at ticks in [0, plen) by compile's clamp, so the high
-		// half of the split uses an open upper bound at plen.
+		// Wrap. Fire tail of old pattern: (lastPos, plen).
+		// CompiledPattern.Events are at ticks in [0, plen), so the strict
+		// upper bound at plen is the natural end-of-iteration boundary.
 		for _, ev := range machine.Events {
-			if ev.Tick > cursor.LastPosition && ev.Tick < plen {
+			if ev.Tick > lastPos && ev.Tick < plen {
 				pe.dispatch(track, ev)
 			}
 		}
 
-		// Rotate slots / promote queued pattern. handleWrap advances the
-		// cursor (T0, CurrentSlot) and signals compile to refill the
-		// consumed slot (and, on queue promotion, both slots of the new
-		// pattern as a safety net).
 		pe.handleWrap(i, curPatternIdx, plen)
 
-		// Dispatch the "leaked" events of the new iteration. If the delta
-		// was so large we'd skip whole pattern iterations, we only fire ONE
-		// loop's worth — MaxDeltaTicks already caps the common case.
-		remainder := (newPos - plen) % plen
+		// After handleWrap: cursor.T0Tick has advanced by plen, CurrentSlot
+		// has flipped, and (possibly) Schedule.Playing was promoted. The new
+		// pattern's Machine[newSlot] may be nil (compile hasn't caught up);
+		// if so we just stay silent for this tick's remainder.
+		remainder := newPos - plen
 		if remainder < 0 {
 			remainder = 0
 		}
-
-		// Re-resolve: the slot may have flipped, and (if queue promoted)
-		// the pattern may have changed. The NEW slot may be nil (if
-		// compile hasn't caught up yet) — that's fine, we just stay silent
-		// for the remainder and pick up on the next tick.
 		_, newMachine := pe.resolveCurrent(track, i)
 		if newMachine != nil {
+			// First tick of new pattern: emit events at [0, remainder].
+			// The lower bound is INCLUSIVE so tick 0 of the new pattern
+			// fires at the very moment of the wrap.
 			for _, ev := range newMachine.Events {
 				if ev.Tick >= 0 && ev.Tick <= remainder {
 					pe.dispatch(track, ev)
 				}
 			}
 		}
-		cursor.LastPosition = remainder
 	}
 
 	pe.lastGlobalTick.Store(globalTick)
 }
 
-// resolveCurrent returns the track's currently-playing pattern index and the
+// resolveCurrent reads the track's currently-playing pattern index and the
 // *CompiledPattern loaded from that pattern's Machine[cursor.CurrentSlot].
 // Returns (0, nil) if the track has no device or no compiled pattern yet.
 //
-// Holds the track's RLock briefly; InputManager's writes briefly block us,
-// which is fine (writes are sub-millisecond).
+// Takes the track's RLock briefly.
 func (pe *PlaybackEngine) resolveCurrent(track *model.Track, trackIdx int) (int, *devices.CompiledPattern) {
 	track.RLock()
 	defer track.RUnlock()
@@ -273,35 +256,23 @@ func (pe *PlaybackEngine) resolveCurrent(track *model.Track, trackIdx int) (int,
 	return 0, nil
 }
 
-// dispatch sends a single timed event out through the configured MIDI output,
-// respecting the track's mute flag.
+// dispatch sends a single event through the MIDI output, honoring Muted.
 func (pe *PlaybackEngine) dispatch(track *model.Track, ev devices.TimedEvent) {
-	if track == nil {
+	if track == nil || track.Muted {
 		return
 	}
-	if track.Muted {
-		return
-	}
-	// TODO(solo): honor Track.Solo across all tracks — if any track has
-	// Solo==true, only solo'd tracks should sound.
+	// TODO(solo): honor Track.Solo across all tracks.
 	_ = pe.out.Send(track.PortName, track.Channel, ev.Event)
 }
 
-// handleWrap runs the per-track bookkeeping when the cursor crosses a pattern
-// boundary:
+// handleWrap runs the per-track bookkeeping when the cursor crosses a
+// pattern boundary:
 //
 //  1. Trash the just-consumed slot (Store nil).
 //  2. If Schedule.Queued is set, promote it to Playing (under track.Lock()).
-//  3. Advance cursor.T0 by the old pattern's length, flip CurrentSlot.
-//  4. Signal compile to refill the trashed slot. If the promotion changed
-//     the pattern, ALSO signal both slots of the new pattern as a safety
-//     net (session.HandlePad ordinarily primes a queued pattern on click,
-//     but a race where we wrap before that compile finishes is acceptable
-//     if we re-signal here).
-//
-// oldPatternIdx is the pattern that was playing when the wrap fired.
-// oldLength is its length in ticks — the caller passes it in because after
-// we trash the slot we can't read it back.
+//  3. Advance cursor.T0Tick by oldLength, flip CurrentSlot.
+//  4. Signal compile to refill the trashed slot (+ both slots of the new
+//     pattern on queue promotion, as a safety net).
 func (pe *PlaybackEngine) handleWrap(trackIdx int, oldPatternIdx int, oldLength int64) {
 	track := pe.project.Tracks[trackIdx]
 	if track == nil {
@@ -310,7 +281,7 @@ func (pe *PlaybackEngine) handleWrap(trackIdx int, oldPatternIdx int, oldLength 
 	cursor := &pe.project.Playback.Cursors[trackIdx]
 	trashedSlot := cursor.CurrentSlot
 
-	// 1) Trash the slot we just consumed. atomic.Store — no lock needed.
+	// 1) Trash the consumed slot.
 	pe.trashSlot(track, oldPatternIdx, trashedSlot)
 
 	// 2) Schedule advance under write lock.
@@ -338,23 +309,11 @@ func (pe *PlaybackEngine) handleWrap(trackIdx int, oldPatternIdx int, oldLength 
 	}
 	track.Unlock()
 
-	// 3) Advance cursor: flip slot, roll T0 forward by old pattern length.
-	// T0 is bookkeeping for "when did the current pattern start"; the tick
-	// loop doesn't read it today (it uses the global t0 + lastGlobalTick
-	// delta instead), but the DESIGN.md §192 "t0 of the current pattern"
-	// contract is kept so future features (pattern-relative position
-	// display, tempo-sync handoff) have it on hand.
-	interval := tickInterval(pe.tempo.Load())
-	if interval > 0 && oldLength > 0 {
-		cursor.T0 = cursor.T0.Add(time.Duration(oldLength) * interval)
-	}
+	// 3) Advance cursor: flip slot, roll T0Tick forward by old length.
+	cursor.T0Tick += oldLength
 	cursor.CurrentSlot = 1 - trashedSlot
 
-	// 4) Signal compile. Always refill the trashed slot of the old pattern
-	// so if the user schedules back to it later the buffer's ready. On
-	// queue promotion, also request both slots of the new pattern — the
-	// session-queue edit path usually primed them already, but re-requesting
-	// is cheap insurance against a compile-channel drop.
+	// 4) Request compile refills.
 	pe.requestCompile(trackIdx, oldPatternIdx, trashedSlot)
 	if newPatternIdx != oldPatternIdx {
 		pe.requestCompile(trackIdx, newPatternIdx, 0)
@@ -362,9 +321,7 @@ func (pe *PlaybackEngine) handleWrap(trackIdx int, oldPatternIdx int, oldLength 
 	}
 }
 
-// requestCompile is a non-blocking send on compileCh, logging (and dropping)
-// when the buffer is full. The compiler is about to drain it anyway, and the
-// next wrap re-signals the same slot.
+// requestCompile is a non-blocking send on compileCh.
 func (pe *PlaybackEngine) requestCompile(trackIdx, patternIdx, slot int) {
 	select {
 	case pe.compileCh <- model.CompileRequest{Track: trackIdx, Pattern: patternIdx, Slot: slot}:
@@ -374,8 +331,7 @@ func (pe *PlaybackEngine) requestCompile(trackIdx, patternIdx, slot int) {
 	}
 }
 
-// trashSlot stores nil into pattern[patternIdx].Machine[slot] for the given
-// track's device type. No-op if the track or pattern is missing.
+// trashSlot stores nil into pattern[patternIdx].Machine[slot].
 func (pe *PlaybackEngine) trashSlot(track *model.Track, patternIdx, slot int) {
 	if track == nil {
 		return
@@ -399,27 +355,26 @@ func (pe *PlaybackEngine) trashSlot(track *model.Track, patternIdx, slot int) {
 	}
 }
 
-// Play starts the transport. Resets the tick counter, anchors t0 to now,
-// zeros every cursor (T0=now, CurrentSlot=0, LastPosition=0), and signals
-// compile to prime BOTH slots of each track's currently-playing pattern.
-// Priming on Play means a fresh NewProject or a post-Load project can hit
-// Play and have audible output on the first wrap without waiting for an
-// edit to trigger compile.
+// Play starts the transport. Anchors wall-clock t0, resets the tick counter,
+// zeros every cursor (T0Tick=0, CurrentSlot=0), and primes both Machine slots
+// of each track's currently-playing pattern.
+//
+// pe.tick and pe.lastGlobalTick are both set to -1 so the FIRST call to
+// processTick enters at globalTick=0, giving a (-1, 0] walk window that
+// includes events at tick 0 (the downbeat).
 func (pe *PlaybackEngine) Play() {
 	now := time.Now()
 	pe.t0Mu.Lock()
 	pe.t0 = now
 	pe.t0Mu.Unlock()
-	pe.tick.Store(0)
-	pe.lastGlobalTick.Store(0)
+	pe.tick.Store(-1)
+	pe.lastGlobalTick.Store(-1)
 	for i := range pe.project.Playback.Cursors {
-		pe.project.Playback.Cursors[i] = model.Cursor{T0: now, CurrentSlot: 0, LastPosition: 0}
+		pe.project.Playback.Cursors[i] = model.Cursor{T0Tick: 0, CurrentSlot: 0}
 	}
 	pe.playing.Store(true)
 
-	// Prime each track's currently-playing pattern's Machine slots. Done
-	// AFTER setting playing=true so the tick goroutine that sees the first
-	// machine-nil slot has already had the compile request queued up.
+	// Prime each active track's current pattern — both slots.
 	for i := 0; i < 8; i++ {
 		track := pe.project.Tracks[i]
 		if track == nil || track.Type == model.DeviceNone {
@@ -447,14 +402,13 @@ func (pe *PlaybackEngine) Play() {
 	}
 }
 
-// Pause halts the transport. Cursors and tick counter are preserved.
+// Pause halts the transport. Cursors are preserved.
 func (pe *PlaybackEngine) Pause() {
 	pe.playing.Store(false)
 }
 
-// SetTempo updates the playback tempo in BPM, clamped to [20, 300]. When
-// called during play, t0 is re-anchored so the current tick count stays
-// consistent under the new interval.
+// SetTempo updates the playback tempo in BPM, clamped to [20, 300]. Re-
+// anchors t0 during play so the current tick count stays consistent.
 func (pe *PlaybackEngine) SetTempo(bpm int) {
 	if bpm < 20 {
 		bpm = 20
@@ -472,9 +426,7 @@ func (pe *PlaybackEngine) SetTempo(bpm int) {
 	}
 }
 
-// ResetCursors zeroes every track's cursor. Called after project load so
-// the new project's cursors start from a known state. Does not touch
-// Machine slots — the caller (InputManager) marks patterns dirty separately.
+// ResetCursors zeroes every track's cursor. Called after project load.
 func (pe *PlaybackEngine) ResetCursors() {
 	for i := range pe.project.Playback.Cursors {
 		pe.project.Playback.Cursors[i] = model.Cursor{}
@@ -484,5 +436,5 @@ func (pe *PlaybackEngine) ResetCursors() {
 // Playing reports whether the transport is currently advancing.
 func (pe *PlaybackEngine) Playing() bool { return pe.playing.Load() }
 
-// Tick returns the current global tick count since the last Play().
+// Tick returns the current global tick count.
 func (pe *PlaybackEngine) Tick() int64 { return pe.tick.Load() }
