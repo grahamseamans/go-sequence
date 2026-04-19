@@ -90,12 +90,12 @@ var scaleIntervals = map[model.ScaleType][]int{
 // Probability is rolled ONCE per stage. If it fails, the stage emits nothing
 // (no note, no ratchets). Ratchets within a gated stage all play — they share
 // the stage's single probability outcome.
-func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
+func (Metropolix) Compile(spec *model.Metropolix, seed uint64) model.CompiledPattern {
 	rng := NewRng(seed)
 
 	playingIdx := spec.Schedule.Playing
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
-		return CompiledPattern{Length: 1}
+		return model.CompiledPattern{Length: 1}
 	}
 	pat := &spec.Patterns[playingIdx]
 
@@ -127,7 +127,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 	// the end of the visit. We need the "current visit's" pitch for the NoteOn
 	// and the "next visit's" pitch for slide bending — so we materialize a
 	// per-visit pitch slice as we walk.
-	events := make([]TimedEvent, 0, len(walk)*4)
+	events := make([]model.TimedEvent, 0, len(walk)*4)
 	currentTick := int64(0)
 
 	// visitPitch[i] is the pitch emitted when visiting walk[i], computed BEFORE
@@ -158,7 +158,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 			for r := 0; r < ratchets; r++ {
 				onTick := currentTick + int64(r)*ratchetInterval
 
-				events = append(events, TimedEvent{
+				events = append(events, model.TimedEvent{
 					Tick: onTick,
 					Event: midi.Event{
 						Type:     midi.NoteOn,
@@ -185,7 +185,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 					offTick = onTick + gt
 				}
 
-				events = append(events, TimedEvent{
+				events = append(events, model.TimedEvent{
 					Tick: offTick,
 					Event: midi.Event{
 						Type: midi.NoteOff,
@@ -228,7 +228,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 			for k := 0; k < pat.SlideTime; k++ {
 				progress := float64(k) / float64(pat.SlideTime)
 				bendSemitones := float64(endPitch-startPitch) * progress
-				events = append(events, TimedEvent{
+				events = append(events, model.TimedEvent{
 					Tick: slideStartTick + int64(k),
 					Event: midi.Event{
 						Type:      midi.PitchBend,
@@ -237,7 +237,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 				})
 			}
 			// Reset bend at the arrival boundary.
-			events = append(events, TimedEvent{
+			events = append(events, model.TimedEvent{
 				Tick: slideStartTick + int64(pat.SlideTime),
 				Event: midi.Event{
 					Type:      midi.PitchBend,
@@ -275,7 +275,7 @@ func (Metropolix) Compile(spec *model.Metropolix, seed uint64) CompiledPattern {
 		return events[i].Tick < events[j].Tick
 	})
 
-	return CompiledPattern{
+	return model.CompiledPattern{
 		Events: events,
 		Length: length,
 	}

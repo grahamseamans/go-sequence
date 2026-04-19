@@ -29,7 +29,7 @@ const noteDurationTicks int64 = 60
 // `kit model.Kit` because the kit lives on the Track, not on the Drum spec,
 // and Compile is a pure function of its inputs. The caller (Compiler
 // goroutine) resolves kit from the track before invoking.
-func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPattern {
+func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) model.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Drum currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
@@ -40,7 +40,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPatter
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
 		// Validate() normally guarantees this, but be defensive: empty
 		// pattern, length 1 (divide-by-zero guard in the walker).
-		return CompiledPattern{Length: 1}
+		return model.CompiledPattern{Length: 1}
 	}
 
 	pat := &spec.Patterns[playingIdx]
@@ -58,7 +58,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPatter
 		stepsInPattern = 32
 	}
 
-	events := make([]TimedEvent, 0, stepsInPattern*4)
+	events := make([]model.TimedEvent, 0, stepsInPattern*4)
 
 	for laneIdx := 0; laneIdx < 16; laneIdx++ {
 		lane := &pat.Notes[laneIdx]
@@ -91,7 +91,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPatter
 				offTick = length - 1
 			}
 
-			events = append(events, TimedEvent{
+			events = append(events, model.TimedEvent{
 				Tick: onTick,
 				Event: midi.Event{
 					Type:     midi.NoteOn,
@@ -99,7 +99,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPatter
 					Velocity: velocity,
 				},
 			})
-			events = append(events, TimedEvent{
+			events = append(events, model.TimedEvent{
 				Tick: offTick,
 				Event: midi.Event{
 					Type:     midi.NoteOff,
@@ -117,7 +117,7 @@ func (Drum) Compile(spec *model.Drum, kit model.Kit, seed uint64) CompiledPatter
 	})
 
 	// EditCounter is stamped by the Compiler goroutine after Compile returns.
-	return CompiledPattern{
+	return model.CompiledPattern{
 		Events: events,
 		Length: length,
 	}

@@ -70,7 +70,7 @@ const minNoteDurationBeats = 0.25
 // clamped to `length - 1` (matches drum.go's boundary convention); the loop
 // wrap will then send the NoteOff slightly before the NoteOn on the next
 // iteration, which is the intended short-tail behavior.
-func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
+func (Piano) Compile(spec *model.Piano, seed uint64) model.CompiledPattern {
 	// Rng is built for future use (probability, humanize). Piano currently has
 	// no random behavior; keep the seed plumbing in place so probability can
 	// be added without changing the signature.
@@ -81,7 +81,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
 	if playingIdx < 0 || playingIdx >= len(spec.Patterns) {
 		// Validate() normally guarantees this; be defensive with length 1 to
 		// keep the walker's modular math safe.
-		return CompiledPattern{Length: 1}
+		return model.CompiledPattern{Length: 1}
 	}
 
 	pat := &spec.Patterns[playingIdx]
@@ -90,7 +90,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
 		length = 1
 	}
 
-	events := make([]TimedEvent, 0, len(pat.Notes)*2)
+	events := make([]model.TimedEvent, 0, len(pat.Notes)*2)
 
 	for i := range pat.Notes {
 		n := &pat.Notes[i]
@@ -111,7 +111,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
 			offTick = length - 1
 		}
 
-		events = append(events, TimedEvent{
+		events = append(events, model.TimedEvent{
 			Tick: onTick,
 			Event: midi.Event{
 				Type:     midi.NoteOn,
@@ -120,7 +120,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
 				Channel:  0,
 			},
 		})
-		events = append(events, TimedEvent{
+		events = append(events, model.TimedEvent{
 			Tick: offTick,
 			Event: midi.Event{
 				Type:     midi.NoteOff,
@@ -138,7 +138,7 @@ func (Piano) Compile(spec *model.Piano, seed uint64) CompiledPattern {
 	})
 
 	// EditCounter is stamped by the Compiler goroutine after Compile returns.
-	return CompiledPattern{
+	return model.CompiledPattern{
 		Events: events,
 		Length: length,
 	}

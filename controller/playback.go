@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-sequence/controller/devices"
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
@@ -32,8 +31,8 @@ type PlaybackEngine struct {
 
 	// Double-buffered per-track events. Playback reads current; compile
 	// writes next. At wrap boundary, current <- next (atomic swap).
-	currentEvents [8]atomic.Pointer[devices.CompiledPattern]
-	nextEvents    [8]atomic.Pointer[devices.CompiledPattern]
+	currentEvents [8]atomic.Pointer[model.CompiledPattern]
+	nextEvents    [8]atomic.Pointer[model.CompiledPattern]
 
 	// Per-track edit version. InputManager bumps on mutation. Compiler
 	// stamps into each CompiledPattern it produces. Used by the wrap
@@ -196,7 +195,7 @@ func (pe *PlaybackEngine) processTick(globalTick int64) {
 // dispatch sends a single timed event out through the configured MIDI output,
 // respecting the track's mute flag. Errors from out.Send are ignored for now
 // (mock outputs and OS send errors are both non-fatal in the tick path).
-func (pe *PlaybackEngine) dispatch(trackIdx int, ev devices.TimedEvent) {
+func (pe *PlaybackEngine) dispatch(trackIdx int, ev model.TimedEvent) {
 	track := pe.project.Tracks[trackIdx]
 	if track == nil {
 		return
@@ -313,7 +312,7 @@ func (pe *PlaybackEngine) ResetCursors() {
 // NextEvents exposes the next_events array to the compiler goroutine, which
 // is the sole writer. Playback reads it (and clears it on promotion) in the
 // wrap handler.
-func (pe *PlaybackEngine) NextEvents() *[8]atomic.Pointer[devices.CompiledPattern] {
+func (pe *PlaybackEngine) NextEvents() *[8]atomic.Pointer[model.CompiledPattern] {
 	return &pe.nextEvents
 }
 

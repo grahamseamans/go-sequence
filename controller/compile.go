@@ -20,7 +20,7 @@ import (
 // into the double-buffer's "next" slot.
 type Compiler struct {
 	project      *model.Project
-	nextEvents   *[8]atomic.Pointer[devices.CompiledPattern]
+	nextEvents   *[8]atomic.Pointer[model.CompiledPattern]
 	editCounters *[8]atomic.Uint64
 	compileCh    <-chan int
 
@@ -89,7 +89,7 @@ func (c *Compiler) compileTrack(trackIdx int) {
 	seed := uint64(time.Now().UnixNano()) ^ uint64(trackIdx) ^ c.loopCounter.Add(1)
 
 	track.RLock()
-	var cp devices.CompiledPattern
+	var cp model.CompiledPattern
 	switch track.Type {
 	case model.DeviceDrum:
 		if track.Drum == nil {
