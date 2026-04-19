@@ -58,7 +58,9 @@
     "CGO_ENABLED": "1",
     "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
     "WEATHER_LAT": "${localEnv:WEATHER_LAT}",
-    "WEATHER_LON": "${localEnv:WEATHER_LON}"
+    "WEATHER_LON": "${localEnv:WEATHER_LON}",
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN_GOSEQUENCE}",
+    "GH_TOKEN": "${localEnv:GITHUB_TOKEN_GOSEQUENCE}"
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
