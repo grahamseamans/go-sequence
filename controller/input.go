@@ -70,7 +70,6 @@ type FocusTarget struct {
 // InputManager owns all input routing and is the sole writer to model state.
 type InputManager struct {
 	project *model.Project
-	pe      *PlaybackEngine
 	out     midi.ToExternal
 	in      midi.FromExternal
 	surface surface.Surface
@@ -97,7 +96,6 @@ type InputManager struct {
 // any goroutines — call Run in its own goroutine to begin fan-in.
 func NewInputManager(
 	project *model.Project,
-	pe *PlaybackEngine,
 	out midi.ToExternal,
 	in midi.FromExternal,
 	surf surface.Surface,
@@ -106,7 +104,6 @@ func NewInputManager(
 ) *InputManager {
 	return &InputManager{
 		project:   project,
-		pe:        pe,
 		out:       out,
 		in:        in,
 		surface:   surf,
@@ -278,21 +275,17 @@ func (im *InputManager) HandleKey(key string) {
 	// Global hotkeys: never forwarded to devices.
 	switch key {
 	case " ", "space":
-		if im.pe.Playing() {
-			im.pe.Pause()
+		if Playing(im.project) {
+			Pause(im.project)
 		} else {
-			im.pe.Play()
+			Play(im.project)
 		}
 		return
 	case "+", "=":
-		newTempo := im.project.Tempo + 1
-		im.pe.SetTempo(newTempo)
-		im.project.Tempo = newTempo
+		SetTempo(im.project, im.project.Tempo+1)
 		return
 	case "-":
-		newTempo := im.project.Tempo - 1
-		im.pe.SetTempo(newTempo)
-		im.project.Tempo = newTempo
+		SetTempo(im.project, im.project.Tempo-1)
 		return
 	case "1", "2", "3", "4", "5", "6", "7", "8":
 		idx := int(key[0] - '1')
@@ -368,8 +361,8 @@ func (im *InputManager) HandleKey(key string) {
 			// Project contents may have been replaced. Per DESIGN §4.5: stop
 			// playback and recompile every track's currently-playing
 			// pattern so playback has something to read on Play.
-			im.pe.Pause()
-			im.pe.ResetCursors()
+			Pause(im.project)
+			ResetCursors(im.project)
 			for i := 0; i < 8; i++ {
 				im.markPlayingDirty(i)
 			}
