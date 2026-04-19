@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go-sequence/model/system"
 )
 
 // Runtime state for a Project. Every type here is referenced by Project's
@@ -43,6 +45,12 @@ type FocusTarget struct {
 type UIState struct {
 	Focus            FocusTarget
 	LastFocusedTrack int // remembered when user navigates away from a track view
+
+	// SystemProject is the entire project-browser widget state (cursor,
+	// edit-mode buffer, cached save list). Lives here — not in a separate
+	// singleton — because it's UI state belonging to the project, and
+	// model/system is a leaf package.
+	SystemProject system.Project `json:"-"`
 }
 
 // PlaybackState is the runtime transport and per-track cursor state owned by

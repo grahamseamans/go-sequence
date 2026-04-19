@@ -19,7 +19,7 @@ import (
 // Compile is the ONE place probability rolls happen — per DESIGN §7. Same
 // (spec, seed) → same output. Fresh seed every loop → fresh rolls every loop.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; functions here
+// Callers (Compiler, input router) hold the Track's mutex; functions here
 // never touch it themselves.
 
 // --- Pages (Launchpad parameter pages, selected via scene-button column) ---
@@ -390,7 +390,7 @@ func applyAccumulator(stage *devices.MetropolixStage, stageIdx int, accum, accum
 // `*model.Metropolix` directly) so future handlers can reach Track-level
 // fields (PortName, Channel) for preview sends. Metropolix has no preview
 // currently, so the track isn't used for MIDI output, but the uniform shape
-// keeps the InputManager wiring simple.
+// keeps the input router wiring simple.
 
 // HandlePad dispatches a pad press/release to the page-specific handler.
 // Releases (down == false) are no-ops.

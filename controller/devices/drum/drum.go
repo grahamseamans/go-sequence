@@ -14,7 +14,7 @@ import (
 // into TimedEvents, plus input handlers that mutate the spec. All behavior
 // lives here; Track.Drum in the model holds only spec data.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; functions here
+// Callers (Compiler, input router) hold the Track's mutex; functions here
 // never touch it themselves.
 
 // noteDurationTicks is how long each drum NoteOn is held before the matching

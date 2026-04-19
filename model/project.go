@@ -32,7 +32,7 @@ type Project struct {
 // Track is one of the project's eight tracks. Exactly one of Drum/Piano/
 // Metropolix is non-nil when Type names a device; all three are nil when
 // Type == DeviceNone. mu guards the track's spec fields against concurrent
-// reads (Compiler, View) and writes (InputManager).
+// reads (Compiler, View) and writes (input router).
 type Track struct {
 	Name       string              `json:"name"`
 	Channel    uint8               `json:"channel"`
@@ -47,7 +47,7 @@ type Track struct {
 	Metropolix *devices.Metropolix `json:"metropolix,omitempty"`
 }
 
-// Lock acquires the track's write lock. Used by InputManager on mutations.
+// Lock acquires the track's write lock. Used by the input router on mutations.
 func (t *Track) Lock() { t.mu.Lock() }
 
 // Unlock releases the track's write lock.

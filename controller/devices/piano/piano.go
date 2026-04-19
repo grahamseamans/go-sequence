@@ -14,7 +14,7 @@ import (
 // spec into TimedEvents, plus input handlers that mutate the spec. All
 // behavior lives here; Track.Piano in the model holds only spec data.
 //
-// Callers (Compiler, InputManager) hold the Track's mutex; functions here
+// Callers (Compiler, input router) hold the Track's mutex; functions here
 // never touch it themselves.
 
 // --- view/edit constants ported from sequencer/pianoroll.go ---
@@ -363,8 +363,8 @@ func HandleKey(track *model.Track, project *model.Project, out midi.ToExternal, 
 // path yet. The recorded Start is the current CenterBeat, the Duration is
 // the current edit-horizontal size. Crude but deterministic.
 //
-// TODO(piano-record-tick): when InputManager gets access to the live
-// playback tick (step 4+), restore the quantize-to-beat behavior and the
+// TODO(piano-record-tick): when the input router gets access to the live
+// playback tick, restore the quantize-to-beat behavior and the
 // NoteOn→NoteOff pairing for accurate durations.
 func HandleMIDI(track *model.Track, out midi.ToExternal, ev midi.Event) {
 	if track == nil || track.Piano == nil {

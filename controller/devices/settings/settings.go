@@ -15,26 +15,17 @@ import (
 // Signature diverges from the canonical project-level device shape: every
 // handler takes an explicit `focusedTrack int`. Settings needs to know
 // which track is being edited, and per DESIGN §4.8 focus lives on
-// InputManager (not in Model), so the input manager passes it down to
-// Settings' handlers. Alternatives considered and rejected:
-//   (a) a FocusedTrack field on model.Project — violates "Model is pure
-//       persisted data; runtime UI state doesn't live in Model".
-//   (b) a grid-based layout where the row encodes "track × cell" — breaks
-//       the 8-track symmetry and loses the popup-driven edit UX.
-//
-// We may unify this across all project-level devices later with an explicit
-// Focus parameter everywhere; for now only Settings needs it.
+// model.UIState (not persisted Model data), so the input router passes
+// project.UI.LastFocusedTrack down to Settings' handlers.
 
 // HandlePad handles pad input on the settings view.
 //
 // The old sequencer/settings.go used the leftmost pad column as a track
-// selector; with an explicit focusedTrack argument that becomes the
-// InputManager's job. Other pads are no-ops for now.
-// TODO(step5): revisit once the view layer drives Settings UI to decide
-// which edits should have a pad shortcut.
+// selector; with an explicit focusedTrack argument that becomes the input
+// router's job. Other pads are no-ops for now.
 func HandlePad(project *model.Project, out midi.ToExternal, focusedTrack, row, col int, down bool) {
-	// Intentional no-op. Track focus is driven by InputManager keybinds, not
-	// by pad presses inside Settings.
+	// Intentional no-op. Track focus is driven by keyboard shortcuts in
+	// controller.HandleKey, not by pad presses inside Settings.
 }
 
 // HandleKey handles keyboard input on the settings view.
@@ -52,9 +43,8 @@ func HandlePad(project *model.Project, out midi.ToExternal, focusedTrack, row, c
 // Port name selection is intentionally dropped for now: the old UI cached
 // the list of available MIDI output ports on the device, which doesn't
 // belong in the pure-compiler shape. Port-name selection will come back
-// through InputManager (which holds the live midi.Ports reference and can
-// enumerate outputs) in step 4/5.
-// TODO(step4): plumb port-name selection through InputManager.
+// through the input router (which holds the live midi.Ports reference and
+// can enumerate outputs).
 func HandleKey(project *model.Project, out midi.ToExternal, focusedTrack int, key string) {
 	if project == nil {
 		return

@@ -1,3 +1,11 @@
+// Package save is the project-level save/load browser.
+//
+// Unlike the per-track musical devices, save has no device struct and
+// instantiates no singleton: its entire state (cursor, edit buffer, cached
+// save list) lives on model.UIState as a system.Project value. All handlers
+// are free functions that take that *system.Project explicitly, following
+// DESIGN §3 ("controller is bags of functions, no types") and DESIGN §4.8
+// ("focus / UI state lives on model.UIState").
 package save
 
 import (
@@ -6,16 +14,17 @@ import (
 	"go-sequence/controller/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/system"
 )
 
-// SaveOps is the file-I/O surface Save needs. Implemented by the
-// controller/ package (controller/project.go) in step 4. Passed into Save's
-// handlers so devices/ can avoid importing controller/ (which would create
-// an import cycle: controller → controller/devices → controller).
+// SaveOps is the file-I/O surface save handlers need. Implemented by the
+// controller/ package (controller/project.go). Passed into handlers so
+// controller/devices/save can stay ignorant of controller/ (which would
+// create an import cycle: controller → controller/devices → controller).
 //
 // Errors are returned to the handler; for now we surface them minimally
 // (edit mode cleared, cache refreshed). A future step can add a status-
-// line channel through Save so the view can display failures.
+// line channel so the view can display failures.
 type SaveOps interface {
 	Save(project *model.Project, name string) error
 	Load(path string) (*model.Project, error)
@@ -24,88 +33,55 @@ type SaveOps interface {
 	RenameSave(oldName, newName string) error
 }
 
-// Save is the project-level save/load browser.
-//
-// Divergences from the canonical empty-struct shape:
-//
-//  1. Save holds transient UI state (cursor, edit-mode buffer, cached
-//     save list). Empty-struct singletons can't carry that without globals.
-//     Per the step 3e brief we put it on the struct and flag this for
-//     possible relocation to InputManager later (DESIGN §4.8-style: UI
-//     cursor/edit state is not Model data).
-//
-//  2. Every handler takes an extra `ops SaveOps` parameter to reach the
-//     filesystem without importing controller/.
-//
-// Save is a non-empty singleton in practice: one Save value lives on the
-// InputManager (it's the only caller); no code instantiates Save twice.
-type Save struct {
-	// cursor is the index into cached of the currently-highlighted save.
-	cursor int
-
-	// editMode is true when the user is typing into editBuf — either to
-	// name a new save or to rename an existing one.
-	editMode bool
-
-	// editKind distinguishes "save current project as <editBuf>" from
-	// "rename saves[cursor] to <editBuf>".
-	editKind editKind
-
-	// editBuf is the in-progress filename while editMode is true.
-	editBuf string
-
-	// cached is the last-known list of save names (no directory path; just
-	// filenames or project-level names — whatever SaveOps.ListSaves returns).
-	// Refreshed on entry and after any mutation.
-	cached []string
-}
-
-// editKind is a small enum distinguishing Save's two text-input modes.
-type editKind uint8
-
-const (
-	editNone editKind = iota
-	editNewSave
-	editRename
-)
-
-// Refresh pulls the latest save list from ops into cached. Called on entry
-// (by InputManager) and after any mutation. Clamps cursor into the new
-// range so a delete doesn't leave it dangling.
-func (s *Save) Refresh(ops SaveOps) {
+// Refresh pulls the latest save list from ops into sp.Cached. Called on
+// entry (by the input router) and after any mutation. Clamps cursor into
+// the new range so a delete doesn't leave it dangling.
+func Refresh(sp *system.Project, ops SaveOps) {
+	if sp == nil {
+		return
+	}
 	if ops == nil {
-		s.cached = nil
-		s.cursor = 0
+		sp.Cached = nil
+		sp.Cursor = 0
 		return
 	}
 	saves, err := ops.ListSaves()
 	if err != nil {
 		// ListSaves failed — surface as empty list rather than stale data.
-		// No silent-catch: we still clear cached and reset the cursor, so a
+		// No silent-catch: we still clear Cached and reset the cursor, so a
 		// later Render can make "no saves" visible.
-		s.cached = nil
-		s.cursor = 0
+		sp.Cached = nil
+		sp.Cursor = 0
 		return
 	}
-	s.cached = saves
-	if s.cursor < 0 {
-		s.cursor = 0
+	sp.Cached = saves
+	if sp.Cursor < 0 {
+		sp.Cursor = 0
 	}
-	if s.cursor >= len(s.cached) {
-		if len(s.cached) == 0 {
-			s.cursor = 0
+	if sp.Cursor >= len(sp.Cached) {
+		if len(sp.Cached) == 0 {
+			sp.Cursor = 0
 		} else {
-			s.cursor = len(s.cached) - 1
+			sp.Cursor = len(sp.Cached) - 1
 		}
 	}
+}
+
+// IsEditing reports whether the save browser is currently in name-edit mode.
+// Callers (e.g. the input router) use this to distinguish enter-commits-
+// a-name from enter-loads-a-project.
+func IsEditing(sp *system.Project) bool {
+	if sp == nil {
+		return false
+	}
+	return sp.EditMode
 }
 
 // HandlePad handles pad input on the save view. The old browser drove a
 // pad grid for project/save selection; with the simplified flat "list of
 // saves" model that's redundant with the keyboard cursor. Leave as a
-// no-op and revisit in step 5 if a touch-first UX is needed.
-// TODO(step5): decide whether to restore a pad-grid browser.
-func (s *Save) HandlePad(project *model.Project, ops SaveOps, out midi.ToExternal, row, col int, down bool) {
+// no-op and revisit if a touch-first UX is needed.
+func HandlePad(sp *system.Project, project *model.Project, ops SaveOps, out midi.ToExternal, row, col int, down bool) {
 	// Intentional no-op.
 }
 
@@ -116,154 +92,137 @@ func (s *Save) HandlePad(project *model.Project, ops SaveOps, out midi.ToExterna
 //	j / down     cursor down
 //	k / up       cursor up
 //	enter         load save at cursor (stops playback elsewhere, per DESIGN §4.5)
-//	s            save current project (enters editNewSave mode to name it)
+//	s            save current project (enters EditNewSave mode to name it)
 //	d / delete   delete save at cursor
-//	r / F2       rename save at cursor (enters editRename mode)
+//	r / F2       rename save at cursor (enters EditRename mode)
 //
 // Keybindings (edit mode):
 //
 //	enter     commit the buffered name
 //	esc       cancel edit
-//	backspace drop last rune of editBuf
-//	<printable> append to editBuf
-//
-// The step 3e brief also mentions arrow navigation; we honor left/right as
-// alternate escape/commit for consistency with the drum handler's h/l
-// navigation — but the simplest mapping is: arrows do nothing in edit
-// mode, commit/cancel require enter/esc explicitly. That avoids a typo
-// committing a half-finished name.
-//
-// Divergences from the old sequencer/save.go:
-//   - Projects-vs-saves two-column layout is dropped. The old code had a
-//     notion of "projects" (directories) each containing multiple dated
-//     "saves". The new SaveOps surface is flat (ListSaves returns a single
-//     list). If we want the project/save split back, extend SaveOps
-//     rather than re-adding it here.
-//   - Confirmation dialog on delete is dropped. ops.DeleteSave is called
-//     immediately; a confirmation step can land later via a third edit
-//     kind if the UX demands it.
-//   - Note-input flag and recreateDevicesFromState are dropped — neither
-//     belongs in the new model.
-func (s *Save) HandleKey(project *model.Project, ops SaveOps, out midi.ToExternal, key string) {
-	if project == nil || ops == nil {
+//	backspace drop last rune of EditBuf
+//	<printable> append to EditBuf
+func HandleKey(sp *system.Project, project *model.Project, ops SaveOps, out midi.ToExternal, key string) {
+	if sp == nil || project == nil || ops == nil {
 		return
 	}
 
-	if s.editMode {
-		s.handleEditKey(project, ops, key)
+	if sp.EditMode {
+		handleEditKey(sp, project, ops, key)
 		return
 	}
 
 	switch key {
 	case "j", "down":
-		if s.cursor < len(s.cached)-1 {
-			s.cursor++
+		if sp.Cursor < len(sp.Cached)-1 {
+			sp.Cursor++
 		}
 	case "k", "up":
-		if s.cursor > 0 {
-			s.cursor--
+		if sp.Cursor > 0 {
+			sp.Cursor--
 		}
 	case "enter":
-		if s.cursor < 0 || s.cursor >= len(s.cached) {
+		if sp.Cursor < 0 || sp.Cursor >= len(sp.Cached) {
 			return
 		}
-		name := s.cached[s.cursor]
+		name := sp.Cached[sp.Cursor]
 		loaded, err := ops.Load(name)
 		if err != nil || loaded == nil {
 			// Load failure. We don't mutate project; callers can inspect the
 			// refreshed cache for evidence the file list changed under us.
-			s.Refresh(ops)
+			Refresh(sp, ops)
 			return
 		}
-		// Swap the project's persisted fields in place. InputManager holds
-		// the same *model.Project pointer the rest of the system reads from,
-		// so we mustn't replace the pointer. Runtime state (PlaybackState)
-		// stays put because it contains atomics that can't be copied.
+		// Swap the project's persisted fields in place. The input router
+		// holds the same *model.Project pointer the rest of the system
+		// reads from, so we mustn't replace the pointer. Runtime state
+		// (PlaybackState) stays put because it contains atomics that can't
+		// be copied.
 		project.ReplacePersisted(loaded)
 		project.Validate()
-		s.Refresh(ops)
+		Refresh(sp, ops)
 	case "s":
-		s.editMode = true
-		s.editKind = editNewSave
-		s.editBuf = ""
+		sp.EditMode = true
+		sp.EditKind = system.EditNewSave
+		sp.EditBuf = ""
 	case "d", "delete":
-		if s.cursor < 0 || s.cursor >= len(s.cached) {
+		if sp.Cursor < 0 || sp.Cursor >= len(sp.Cached) {
 			return
 		}
-		name := s.cached[s.cursor]
+		name := sp.Cached[sp.Cursor]
 		if err := ops.DeleteSave(name); err != nil {
 			// Delete failure; refresh to show true state.
-			s.Refresh(ops)
+			Refresh(sp, ops)
 			return
 		}
-		s.Refresh(ops)
+		Refresh(sp, ops)
 	case "r", "f2":
-		if s.cursor < 0 || s.cursor >= len(s.cached) {
+		if sp.Cursor < 0 || sp.Cursor >= len(sp.Cached) {
 			return
 		}
-		s.editMode = true
-		s.editKind = editRename
-		s.editBuf = s.cached[s.cursor]
+		sp.EditMode = true
+		sp.EditKind = system.EditRename
+		sp.EditBuf = sp.Cached[sp.Cursor]
 	}
 }
 
 // handleEditKey handles keyboard input while the name editor is active.
-func (s *Save) handleEditKey(project *model.Project, ops SaveOps, key string) {
+func handleEditKey(sp *system.Project, project *model.Project, ops SaveOps, key string) {
 	switch key {
 	case "enter":
-		name := strings.TrimSpace(s.editBuf)
+		name := strings.TrimSpace(sp.EditBuf)
 		if name == "" {
 			// Empty name — cancel rather than commit to an empty filename.
-			s.exitEdit()
+			exitEdit(sp)
 			return
 		}
-		switch s.editKind {
-		case editNewSave:
+		switch sp.EditKind {
+		case system.EditNewSave:
 			if err := ops.Save(project, name); err != nil {
-				s.exitEdit()
-				s.Refresh(ops)
+				exitEdit(sp)
+				Refresh(sp, ops)
 				return
 			}
-		case editRename:
-			if s.cursor < 0 || s.cursor >= len(s.cached) {
-				s.exitEdit()
+		case system.EditRename:
+			if sp.Cursor < 0 || sp.Cursor >= len(sp.Cached) {
+				exitEdit(sp)
 				return
 			}
-			oldName := s.cached[s.cursor]
+			oldName := sp.Cached[sp.Cursor]
 			if err := ops.RenameSave(oldName, name); err != nil {
-				s.exitEdit()
-				s.Refresh(ops)
+				exitEdit(sp)
+				Refresh(sp, ops)
 				return
 			}
 		}
-		s.exitEdit()
-		s.Refresh(ops)
+		exitEdit(sp)
+		Refresh(sp, ops)
 	case "esc":
-		s.exitEdit()
+		exitEdit(sp)
 	case "backspace":
-		if len(s.editBuf) > 0 {
-			s.editBuf = s.editBuf[:len(s.editBuf)-1]
+		if len(sp.EditBuf) > 0 {
+			sp.EditBuf = sp.EditBuf[:len(sp.EditBuf)-1]
 		}
 	default:
 		// Accept single printable ASCII characters. Reject path separators
-		// explicitly — the editBuf is used as a filename downstream.
+		// explicitly — the EditBuf is used as a filename downstream.
 		if len(key) == 1 && key[0] >= 32 && key[0] < 127 && key != "/" && key != "\\" {
-			s.editBuf += key
+			sp.EditBuf += key
 		}
 	}
 }
 
 // exitEdit clears editor state. Called on commit, cancel, and any failure.
-func (s *Save) exitEdit() {
-	s.editMode = false
-	s.editKind = editNone
-	s.editBuf = ""
+func exitEdit(sp *system.Project) {
+	sp.EditMode = false
+	sp.EditKind = system.EditNone
+	sp.EditBuf = ""
 }
 
-// Render is a stub; step 5 will port the TUI view from sequencer/save.go.
-// TODO(step5): port rendering from sequencer/save.go when view/ rewires.
-func (s *Save) Render(project *model.Project, ops SaveOps) string { return "" }
+// Render is a stub; the view layer will port the TUI view.
+func Render(sp *system.Project, project *model.Project, ops SaveOps) string { return "" }
 
-// RenderLEDs is a stub; step 5 will port the LED layout from sequencer/save.go.
-// TODO(step5): port rendering from sequencer/save.go when view/ rewires.
-func (s *Save) RenderLEDs(project *model.Project, ops SaveOps) []surface.LED { return nil }
+// RenderLEDs is a stub; the view layer will port the LED layout.
+func RenderLEDs(sp *system.Project, project *model.Project, ops SaveOps) []surface.LED {
+	return nil
+}

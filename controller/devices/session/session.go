@@ -63,11 +63,12 @@ func HandlePad(project *model.Project, out midi.ToExternal, row, col int, down b
 //
 // The old sequencer/session.go had an internal (cursorRow, cursorCol) and
 // used h/j/k/l/space/enter to drive a soft cursor. Per DESIGN §4.8 focus
-// lives on InputManager, not per-device, so cursor-style UI state is
+// lives on model.UIState, not per-device, so cursor-style UI state is
 // dropped here. If we want a keyboard launcher later, it should come back
-// via InputManager's focus/selection, not on a hidden Session field.
+// via model.UIState, not on a hidden Session field.
 func HandleKey(project *model.Project, out midi.ToExternal, key string) {
-	// Intentional no-op until InputManager gains session-cursor state.
+	// Intentional no-op until session-cursor state is added to
+	// model.UIState.
 }
 
 // Render is a stub; step 5 will port the TUI view from sequencer/session.go.

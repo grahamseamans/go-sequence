@@ -13,14 +13,14 @@
 // skips leftover *.tmp.json files.
 //
 // LoadProject does NOT stop playback or trigger a recompile. Per DESIGN §4.5
-// that is InputManager's job: after swapping the project state in, it sends
-// one compileCh signal per track so the compile goroutine re-renders against
-// the fresh specs.
+// that is the input router's job: after swapping the project state in, it
+// sends one compile request per track so the compile goroutine re-renders
+// against the fresh specs.
 //
 // controllerSaveOps wraps the package-level helpers and implements
 // save.SaveOps so that controller/devices/save can stay ignorant of
 // controller/ (no import cycle). NewControllerSaveOps is the factory the
-// wiring code (main.go, eventually InputManager construction) calls.
+// wiring code (main.go) calls.
 package controller
 
 import (
@@ -101,9 +101,9 @@ func SaveProject(p *model.Project, name string) error {
 //
 // This function is deliberately I/O-only: it does NOT stop playback, does
 // NOT swap the live project pointer, and does NOT trigger recompiles. Per
-// DESIGN §4.5 those responsibilities sit with InputManager (which is the
-// sole writer to the live project state) and the compile goroutine (which
-// is the only producer of CompiledPatterns).
+// DESIGN §4.5 those responsibilities sit with the input router (which is
+// the sole writer to the live project state) and the compile goroutine
+// (which is the only producer of CompiledPatterns).
 func LoadProject(path string) (*model.Project, error) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
@@ -212,8 +212,8 @@ func RenameSave(oldName, newName string) error {
 
 // controllerSaveOps is the save.SaveOps implementation that forwards to the
 // package-level Save/Load/List/Delete/Rename functions. Injected into
-// InputManager and then into save.Save so controller/devices/save doesn't
-// need to import controller/ (which would create a cycle).
+// RunInput / HandleKey so controller/devices/save doesn't need to import
+// controller/ (which would create a cycle).
 type controllerSaveOps struct{}
 
 // NewControllerSaveOps returns the concrete SaveOps impl for injection.

@@ -1,34 +1,39 @@
 // Package controller: input.go — the central event router and sole writer
 // to model state.
 //
-// InputManager fans in events from three sources and dispatches them:
+// This file exposes two public entry points — both free functions, no
+// types — per DESIGN §3 ("controller is bags of functions, no types") and
+// §4.8 (focus/UI state lives on model.UIState, not on a controller-owned
+// struct):
 //
-//  1. Pad events from the Launchpad (surface.PadEvents()).
-//  2. Keyboard events from the TUI, delivered synchronously via HandleKey.
-//  3. Per-track MIDI-in, one goroutine per track subscribed to the track's
-//     configured (PortName, Channel).
+//  1. RunInput — the fan-in goroutine. Starts per-track MIDI-in
+//     subscribers and consumes pad events from the surface until ctx is
+//     cancelled. Per-track subscribers are parented on the derived ctx so
+//     they shut down automatically when RunInput returns.
+//  2. HandleKey — called synchronously from the view (Bubbletea)
+//     goroutine with each keystroke. Global hotkeys (transport, focus) are
+//     handled directly; everything else routes to the focused device.
 //
-// All writes to model state (specs, schedules, transport-adjacent fields)
-// flow through InputManager. It's also the single source that decides when
-// a pattern's Machine slots are stale: on mutation it nils both slots and
-// non-blocking-sends TWO CompileRequests (one per slot) on compileCh. The
+// All writes to model state flow through these two entry points. On every
+// mutation we nil the affected pattern's Machine slots and non-blocking-
+// send TWO CompileRequests (one per slot) on project.Compile.Channel; the
 // compile goroutine then renders a fresh CompiledPattern into each slot.
 //
 // Concurrency shape (DESIGN §6):
 //
-//   - InputManager writes spec fields under track.Lock(). Compiler holds
-//     track.RLock() while reading, so writes briefly block compiles. Writes
-//     are bursty and sub-millisecond.
-//   - Focus state (`focused`, `lastFocusedTrack`) is mutated only by
-//     InputManager's own goroutine (Run's select loop) plus HandleKey which
-//     runs on the view goroutine. That's two writers — acceptable only
-//     because HandleKey and Run never contend for the same field within a
-//     single logical operation and because Focused() returns a value copy.
-//     If multi-writer ever becomes a problem we'd switch to atomic.Pointer
-//     or route keys through a channel; not worth it yet.
-//   - compileCh is non-blocking: if the buffer fills we log and drop. The
-//     compiler is about to drain it anyway, and each drop is followed by
-//     the very next tick-wrap signal which effectively re-queues.
+//   - Spec writes hold track.Lock(). Compiler holds track.RLock() while
+//     reading, so writes briefly block compiles. Writes are bursty and
+//     sub-millisecond.
+//   - project.UI (Focus, LastFocusedTrack, SystemProject) is mutated only
+//     by RunInput's goroutine plus HandleKey on the view goroutine. That's
+//     two writers — acceptable only because HandleKey and RunInput never
+//     contend for the same field within a single logical operation. If
+//     multi-writer ever becomes a problem we'd switch to atomic.Pointer or
+//     route keys through a channel; not worth it yet.
+//   - project.Compile.Channel is non-blocking: if the buffer fills we log
+//     and drop. The compiler is about to drain it anyway, and each drop is
+//     followed by the very next tick-wrap signal which effectively
+//     re-queues.
 package controller
 
 import (
@@ -48,81 +53,26 @@ import (
 	"go-sequence/model/devices"
 )
 
-// FocusKind tags which UI context input is routed to. Per DESIGN §4.8 focus
-// lives on InputManager, not in Model.
-type FocusKind int
-
-const (
-	FocusTrack FocusKind = iota
-	FocusSession
-	FocusSettings
-	FocusSave
-)
-
-// FocusTarget is the current focus. Track is only meaningful when
-// Kind == FocusTrack; for Settings we use lastFocusedTrack to remember
-// which track the user was on before tabbing to Settings.
-type FocusTarget struct {
-	Kind  FocusKind
-	Track int // valid when Kind == FocusTrack; 0-7
-}
-
-// InputManager owns all input routing and is the sole writer to model state.
-type InputManager struct {
-	project *model.Project
-	out     midi.ToExternal
-	in      midi.FromExternal
-	surface surface.Surface
-
-	compileCh chan<- model.CompileRequest
-
-	// Focus state. Mutated only by InputManager (Run's select loop + the view
-	// goroutine via HandleKey). Read by view via Focused() as a value copy.
-	focused          FocusTarget
-	lastFocusedTrack int // remembered when navigating to Settings/Session/Save
-
-	// Save is the only stateful device singleton — it carries the save-
-	// browser cursor and text-edit buffer. All other per-domain packages
-	// (drum, piano, metropolix, session, settings, empty) expose free
-	// functions and need no singleton.
-	save    *save.Save
-	saveOps save.SaveOps
-
-	// Per-track MIDI subscriber cancels, so Close() can unsubscribe cleanly.
-	midiCancels [8]context.CancelFunc
-}
-
-// NewInputManager wires InputManager to its collaborators. Does NOT start
-// any goroutines — call Run in its own goroutine to begin fan-in.
-func NewInputManager(
+// RunInput starts per-track MIDI-in subscribers and fans pad events into
+// the dispatcher until ctx is cancelled. Invoke in its own goroutine from
+// main. All subscribers are parented on a context derived from ctx, so
+// they shut down automatically when RunInput returns.
+func RunInput(
+	ctx context.Context,
 	project *model.Project,
 	out midi.ToExternal,
 	in midi.FromExternal,
 	surf surface.Surface,
-	compileCh chan<- model.CompileRequest,
 	saveOps save.SaveOps,
-) *InputManager {
-	return &InputManager{
-		project:   project,
-		out:       out,
-		in:        in,
-		surface:   surf,
-		compileCh: compileCh,
-		focused:   FocusTarget{Kind: FocusTrack, Track: 0},
-		save:      &save.Save{},
-		saveOps:   saveOps,
-	}
-}
+) {
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-// Run starts per-track MIDI-in subscribers, then consumes pad events from
-// the surface until ctx is cancelled. Should be invoked in its own goroutine
-// from main.
-func (im *InputManager) Run(ctx context.Context) {
 	for i := 0; i < 8; i++ {
-		im.startMidiSubscriber(ctx, i)
+		startMidiSubscriber(subCtx, project, out, in, i)
 	}
 
-	padCh := im.surface.PadEvents()
+	padCh := surf.PadEvents()
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,32 +81,32 @@ func (im *InputManager) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			im.handlePad(ev)
+			handlePad(project, out, saveOps, ev)
 		}
 	}
 }
 
 // Focused returns the current focus target by value, safe to read from the
 // view goroutine without locking.
-func (im *InputManager) Focused() FocusTarget { return im.focused }
+func Focused(project *model.Project) model.FocusTarget {
+	return project.UI.Focus
+}
 
-// startMidiSubscriber spins up a goroutine that forwards MIDI-in events for
-// one track through the normal dispatch path. Skips tracks that have no
-// device or no configured port — silent, because those tracks legitimately
-// shouldn't receive MIDI.
-func (im *InputManager) startMidiSubscriber(parentCtx context.Context, trackIdx int) {
-	track := im.project.Tracks[trackIdx]
+// startMidiSubscriber spins up a goroutine that forwards MIDI-in events
+// for one track through the normal dispatch path. Skips tracks that have
+// no device or no configured port — silent, because those tracks
+// legitimately shouldn't receive MIDI.
+func startMidiSubscriber(ctx context.Context, project *model.Project, out midi.ToExternal, in midi.FromExternal, trackIdx int) {
+	track := project.Tracks[trackIdx]
 	if track == nil || track.Type == model.DeviceNone || track.PortName == "" {
 		return
 	}
-	ch, err := im.in.Subscribe(track.PortName, track.Channel)
+	ch, err := in.Subscribe(track.PortName, track.Channel)
 	if err != nil {
 		debug.Log("input", "midi subscribe failed track=%d port=%q err=%v",
 			trackIdx, track.PortName, err)
 		return
 	}
-	ctx, cancel := context.WithCancel(parentCtx)
-	im.midiCancels[trackIdx] = cancel
 	go func() {
 		for {
 			select {
@@ -166,41 +116,42 @@ func (im *InputManager) startMidiSubscriber(parentCtx context.Context, trackIdx 
 				if !ok {
 					return
 				}
-				im.handleMidi(trackIdx, ev)
+				handleMidi(project, out, trackIdx, ev)
 			}
 		}
 	}()
 }
 
-// handlePad routes a pad event to the focused UI. Per-track dispatches hold
-// track.Lock for the duration of the handler, then mark the track dirty if
-// the press could have mutated state (only on press, not release).
-func (im *InputManager) handlePad(ev surface.PadEvent) {
-	switch im.focused.Kind {
-	case FocusTrack:
-		idx := im.focused.Track
-		track := im.project.Tracks[idx]
+// handlePad routes a pad event to the focused UI. Per-track dispatches
+// hold track.Lock for the duration of the handler, then mark the track
+// dirty if the press could have mutated state (only on press, not
+// release).
+func handlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps, ev surface.PadEvent) {
+	switch project.UI.Focus.Kind {
+	case model.FocusTrack:
+		idx := project.UI.Focus.Track
+		track := project.Tracks[idx]
 		if track == nil {
 			return
 		}
 		track.Lock()
 		switch track.Type {
 		case model.DeviceDrum:
-			drum.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			drum.HandlePad(track, project, out, ev.Row, ev.Col, ev.Down)
 		case model.DevicePiano:
-			piano.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			piano.HandlePad(track, project, out, ev.Row, ev.Col, ev.Down)
 		case model.DeviceMetropolix:
-			metropolix.HandlePad(track, im.project, im.out, ev.Row, ev.Col, ev.Down)
+			metropolix.HandlePad(track, project, out, ev.Row, ev.Col, ev.Down)
 		default:
 			// DeviceNone — no-op device still gets the event for symmetry.
-			empty.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
+			empty.HandlePad(project, out, ev.Row, ev.Col, ev.Down)
 		}
 		track.Unlock()
 		if ev.Down {
-			im.markTrackDirty(idx)
+			markTrackDirty(project, idx)
 		}
 
-	case FocusSession:
+	case model.FocusSession:
 		// Session mutates Schedule.Queued on project.Tracks[ev.Row]. Lock
 		// THAT track (not the currently-focused track). The "dirty" pattern
 		// is the queued column itself — mark it so its Machine slots are
@@ -208,181 +159,177 @@ func (im *InputManager) handlePad(ev surface.PadEvent) {
 		if ev.Row < 0 || ev.Row >= 8 {
 			return
 		}
-		tgt := im.project.Tracks[ev.Row]
+		tgt := project.Tracks[ev.Row]
 		if tgt != nil {
 			tgt.Lock()
 		}
-		session.HandlePad(im.project, im.out, ev.Row, ev.Col, ev.Down)
+		session.HandlePad(project, out, ev.Row, ev.Col, ev.Down)
 		if tgt != nil {
 			tgt.Unlock()
 		}
 		if ev.Down {
 			// ev.Col is the queued pattern index; see session.HandlePad.
-			im.markPatternDirty(ev.Row, ev.Col)
+			markPatternDirty(project, ev.Row, ev.Col)
 		}
 
-	case FocusSettings:
-		// Settings edits fields on Tracks[lastFocusedTrack]. Lock that track
-		// around the handler.
-		idx := im.lastFocusedTrack
-		tgt := im.project.Tracks[idx]
+	case model.FocusSettings:
+		// Settings edits fields on Tracks[LastFocusedTrack]. Lock that
+		// track around the handler.
+		idx := project.UI.LastFocusedTrack
+		tgt := project.Tracks[idx]
 		if tgt != nil {
 			tgt.Lock()
 		}
-		settings.HandlePad(im.project, im.out, idx, ev.Row, ev.Col, ev.Down)
+		settings.HandlePad(project, out, idx, ev.Row, ev.Col, ev.Down)
 		if tgt != nil {
 			tgt.Unlock()
 		}
 		if ev.Down {
-			im.markTrackDirty(idx)
+			markTrackDirty(project, idx)
 		}
 
-	case FocusSave:
-		// Save doesn't take track locks; its pad handler is currently a
-		// no-op, but keep the dispatch symmetric so a future pad UX lands
-		// here without ceremony. Load (via HandleKey) is the only path that
-		// mutates project-wide — handled in HandleKey.
-		im.save.HandlePad(im.project, im.saveOps, im.out, ev.Row, ev.Col, ev.Down)
+	case model.FocusProject:
+		// Project-browser doesn't take track locks; its pad handler is
+		// currently a no-op, but keep the dispatch symmetric so a future
+		// pad UX lands here without ceremony. Load (via HandleKey) is the
+		// only path that mutates project-wide — handled in HandleKey.
+		save.HandlePad(&project.UI.SystemProject, project, saveOps, out, ev.Row, ev.Col, ev.Down)
 	}
 }
 
-// handleMidi routes a MIDI-in event to the track's device. Always bumps the
-// track's edit counter — any recording device may have mutated spec, and
-// non-recording devices' HandleMIDI is a no-op so the extra recompile is
-// effectively a cheap false positive we accept for simplicity.
-func (im *InputManager) handleMidi(trackIdx int, ev midi.Event) {
-	track := im.project.Tracks[trackIdx]
+// handleMidi routes a MIDI-in event to the track's device. Always bumps
+// the track's edit counter — any recording device may have mutated spec,
+// and non-recording devices' HandleMIDI is a no-op so the extra recompile
+// is effectively a cheap false positive we accept for simplicity.
+func handleMidi(project *model.Project, out midi.ToExternal, trackIdx int, ev midi.Event) {
+	track := project.Tracks[trackIdx]
 	if track == nil {
 		return
 	}
 	track.Lock()
 	switch track.Type {
 	case model.DeviceDrum:
-		drum.HandleMIDI(track, im.out, ev)
+		drum.HandleMIDI(track, out, ev)
 	case model.DevicePiano:
-		piano.HandleMIDI(track, im.out, ev)
+		piano.HandleMIDI(track, out, ev)
 	case model.DeviceMetropolix:
-		metropolix.HandleMIDI(track, im.out, ev)
+		metropolix.HandleMIDI(track, out, ev)
 	}
 	track.Unlock()
-	im.markTrackDirty(trackIdx)
+	markTrackDirty(project, trackIdx)
 }
 
 // HandleKey is invoked synchronously from the view (Bubbletea) goroutine.
 // Global hotkeys (transport, focus) are handled directly; everything else
 // routes to the focused device under the appropriate track lock.
-func (im *InputManager) HandleKey(key string) {
+func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps, key string) {
 	// Global hotkeys: never forwarded to devices.
 	switch key {
 	case " ", "space":
-		if Playing(im.project) {
-			Pause(im.project)
+		if Playing(project) {
+			Pause(project)
 		} else {
-			Play(im.project)
+			Play(project)
 		}
 		return
 	case "+", "=":
-		SetTempo(im.project, im.project.Tempo+1)
+		SetTempo(project, project.Tempo+1)
 		return
 	case "-":
-		SetTempo(im.project, im.project.Tempo-1)
+		SetTempo(project, project.Tempo-1)
 		return
 	case "1", "2", "3", "4", "5", "6", "7", "8":
 		idx := int(key[0] - '1')
-		im.focused = FocusTarget{Kind: FocusTrack, Track: idx}
-		im.lastFocusedTrack = idx
+		project.UI.Focus = model.FocusTarget{Kind: model.FocusTrack, Track: idx}
+		project.UI.LastFocusedTrack = idx
 		return
 	case ",":
-		im.focused.Kind = FocusSettings
+		project.UI.Focus.Kind = model.FocusSettings
 		return
 	case "S":
-		im.focused.Kind = FocusSave
+		project.UI.Focus.Kind = model.FocusProject
 		// Refresh the save-list cache on entry so the browser shows the
-		// current state of disk, not whatever was cached last time we were
-		// focused here.
-		im.save.Refresh(im.saveOps)
+		// current state of disk, not whatever was cached last time we
+		// were focused here.
+		save.Refresh(&project.UI.SystemProject, saveOps)
 		return
 	case "tab":
-		im.focused.Kind = FocusSession
+		project.UI.Focus.Kind = model.FocusSession
 		return
 	}
 
 	// Not a global hotkey — route to the focused device.
-	switch im.focused.Kind {
-	case FocusTrack:
-		idx := im.focused.Track
-		track := im.project.Tracks[idx]
+	switch project.UI.Focus.Kind {
+	case model.FocusTrack:
+		idx := project.UI.Focus.Track
+		track := project.Tracks[idx]
 		if track == nil {
 			return
 		}
 		track.Lock()
 		switch track.Type {
 		case model.DeviceDrum:
-			drum.HandleKey(track, im.project, im.out, key)
+			drum.HandleKey(track, project, out, key)
 		case model.DevicePiano:
-			piano.HandleKey(track, im.project, im.out, key)
+			piano.HandleKey(track, project, out, key)
 		case model.DeviceMetropolix:
-			metropolix.HandleKey(track, im.project, im.out, key)
+			metropolix.HandleKey(track, project, out, key)
 		default:
-			empty.HandleKey(im.project, im.out, key)
+			empty.HandleKey(project, out, key)
 		}
 		track.Unlock()
-		im.markTrackDirty(idx)
+		markTrackDirty(project, idx)
 
-	case FocusSession:
-		// Session.HandleKey is currently a no-op, but dispatch for symmetry.
-		// No dirty-mark: no state change possible.
-		session.HandleKey(im.project, im.out, key)
+	case model.FocusSession:
+		// Session.HandleKey is currently a no-op, but dispatch for
+		// symmetry. No dirty-mark: no state change possible.
+		session.HandleKey(project, out, key)
 
-	case FocusSettings:
-		idx := im.lastFocusedTrack
-		tgt := im.project.Tracks[idx]
+	case model.FocusSettings:
+		idx := project.UI.LastFocusedTrack
+		tgt := project.Tracks[idx]
 		if tgt != nil {
 			tgt.Lock()
 		}
-		settings.HandleKey(im.project, im.out, idx, key)
+		settings.HandleKey(project, out, idx, key)
 		if tgt != nil {
 			tgt.Unlock()
 		}
-		im.markTrackDirty(idx)
+		markTrackDirty(project, idx)
 
-	case FocusSave:
-		// Any "enter" while focused on Save is treated as a potential load
-		// (enter is also used to commit a name in edit mode, but the
-		// commit-name path is a cheap false positive that just triggers
-		// one extra round of recompiles — still correct).
-		//
-		// TODO(step4c-followup): expose save.Save.IsEditing() so we can
-		// distinguish commit-name from load and skip the unnecessary
-		// Pause + 8 recompiles in the commit-name case.
-		wasLoad := key == "enter" || key == "return"
-		im.save.HandleKey(im.project, im.saveOps, im.out, key)
+	case model.FocusProject:
+		// An "enter" while focused on the project browser is a potential
+		// load. If we're in edit-commit mode (IsEditing returns true),
+		// enter commits a name rather than loading — no need for the
+		// post-load Pause + recompile in that case.
+		wasLoad := (key == "enter" || key == "return") && !save.IsEditing(&project.UI.SystemProject)
+		save.HandleKey(&project.UI.SystemProject, project, saveOps, out, key)
 		if wasLoad {
-			// Project contents may have been replaced. Per DESIGN §4.5: stop
-			// playback and recompile every track's currently-playing
+			// Project contents may have been replaced. Per DESIGN §4.5:
+			// stop playback and recompile every track's currently-playing
 			// pattern so playback has something to read on Play.
-			Pause(im.project)
-			ResetCursors(im.project)
+			Pause(project)
+			ResetCursors(project)
 			for i := 0; i < 8; i++ {
-				im.markPlayingDirty(i)
+				markPlayingDirty(project, i)
 			}
 		}
 	}
 }
 
 // markTrackDirty trashes both Machine slots of the edited pattern on the
-// named track and signals the compiler to refill them. The "edited pattern"
-// is resolved from the device's EditingPatternIdx for device handlers, or
-// from the just-queued pattern for session handlers — we pass the pattern
-// index in explicitly via markPatternDirty below.
+// named track and signals the compiler to refill them. The "edited
+// pattern" is resolved from the device's EditingPatternIdx for device
+// handlers, or from the just-queued pattern for session handlers — we
+// pass the pattern index in explicitly via markPatternDirty below.
 //
-// This wrapper figures out the editing pattern for the focused-device case,
-// which is what the pad/key/midi handlers want.
-func (im *InputManager) markTrackDirty(trackIdx int) {
+// This wrapper figures out the editing pattern for the focused-device
+// case, which is what the pad/key/midi handlers want.
+func markTrackDirty(project *model.Project, trackIdx int) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return
 	}
-	track := im.project.Tracks[trackIdx]
+	track := project.Tracks[trackIdx]
 	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
@@ -406,17 +353,17 @@ func (im *InputManager) markTrackDirty(trackIdx int) {
 	default:
 		return
 	}
-	im.markPatternDirty(trackIdx, patternIdx)
+	markPatternDirty(project, trackIdx, patternIdx)
 }
 
-// markPlayingDirty is like markTrackDirty but targets the currently-playing
-// pattern (Schedule.Playing) rather than the editing one. Used after project
-// load to prime the Machine slots playback will read from.
-func (im *InputManager) markPlayingDirty(trackIdx int) {
+// markPlayingDirty is like markTrackDirty but targets the currently-
+// playing pattern (Schedule.Playing) rather than the editing one. Used
+// after project load to prime the Machine slots playback will read from.
+func markPlayingDirty(project *model.Project, trackIdx int) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return
 	}
-	track := im.project.Tracks[trackIdx]
+	track := project.Tracks[trackIdx]
 	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
@@ -440,7 +387,7 @@ func (im *InputManager) markPlayingDirty(trackIdx int) {
 	default:
 		return
 	}
-	im.markPatternDirty(trackIdx, patternIdx)
+	markPatternDirty(project, trackIdx, patternIdx)
 }
 
 // markPatternDirty trashes both Machine slots of the named pattern on the
@@ -455,14 +402,14 @@ func (im *InputManager) markPlayingDirty(trackIdx int) {
 // observing a stale cached CompiledPattern between the edit and the
 // compile completing would briefly emit wrong events. The nil makes
 // playback silent for that window instead.)
-func (im *InputManager) markPatternDirty(trackIdx, patternIdx int) {
+func markPatternDirty(project *model.Project, trackIdx, patternIdx int) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return
 	}
 	if patternIdx < 0 || patternIdx >= devices.NumPatterns {
 		return
 	}
-	track := im.project.Tracks[trackIdx]
+	track := project.Tracks[trackIdx]
 	if track == nil {
 		return
 	}
@@ -487,7 +434,7 @@ func (im *InputManager) markPatternDirty(trackIdx, patternIdx int) {
 	}
 	for slot := 0; slot < 2; slot++ {
 		select {
-		case im.compileCh <- model.CompileRequest{Track: trackIdx, Pattern: patternIdx, Slot: slot}:
+		case project.Compile.Channel <- model.CompileRequest{Track: trackIdx, Pattern: patternIdx, Slot: slot}:
 		default:
 			debug.Log("input", "compileCh full, dropping compile request for track=%d pattern=%d slot=%d", trackIdx, patternIdx, slot)
 		}
