@@ -18,8 +18,7 @@
     "vscode": {
       "extensions": [
         "anthropic.claude-code",
-        "golang.go",
-        "eamodio.gitlens"
+        "golang.go"
       ],
       "settings": {
         "editor.formatOnSave": true,
