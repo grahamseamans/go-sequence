@@ -2,27 +2,39 @@
 
 A free, software clone of expensive hardware MIDI sequencers (Cirklon, Hapax, Pyramid, Metropolix, Torso T-1), driven by a Novation Launchpad. Not a DAW — a MIDI brain that sits between your controller and your synths.
 
-This document describes the target architecture. It's the source of truth for design decisions and the reference for implementation. It is expected to evolve; check git history for older versions.
+This document describes the target architecture. Source of truth for design decisions. Check git history for older versions.
 
 ---
 
-## 1. Architecture
+## 1. The whole system, in five lines
 
-go-sequence is structured as MVC, with all hardware I/O living inside Controller:
+- **Model** — state. Human patterns (what you edit), machine patterns (what plays), schedule (which patterns in what order), transport (playing/stopped/tempo).
+- **Controller: devices** — pure compilers. Human pattern → machine pattern.
+- **Controller: input manager** — receives events (pad/key/MIDI in). Mutates state. Calls the device compiler when a human pattern changed.
+- **Controller: playback engine** — reads state, dispatches MIDI.
+- **View** — renders state.
+
+Everything else is implementation detail.
+
+---
+
+## 2. Architecture
 
 ```
                         ┌────────────────┐
-                        │     model/     │   data only, no behavior
-                        │  Project, Drum,│   one source of truth
-                        │  Piano, ...    │
+                        │     model/     │   data only
+                        │ Project, Drum, │   human patterns
+                        │ Piano, ...     │   machine patterns (runtime)
                         └────────────────┘
                           ▲             ▲
                   reads   │             │ reads + mutates
                           │             │
                 ┌─────────┴───┐  ┌──────┴────────────────────────┐
                 │    view/    │  │         controller/           │
-                │  TUI now,   │  │  manager.go (tick + dispatch) │
-                │  Wails next │  │  ┌──────────────────────────┐ │
+                │  TUI now,   │  │  playback.go (playback engine)│
+                │  Wails next │  │  input.go    (input manager)  │
+                │             │  │  project.go  (save/load)      │
+                │             │  │  ┌──────────────────────────┐ │
                 │             │  │  │ devices/  Drum, Piano,   │ │
                 │             │  │  │           Metropolix,    │ │
                 │             │  │  │           Session, ...   │ │
@@ -41,421 +53,359 @@ go-sequence is structured as MVC, with all hardware I/O living inside Controller
                     keyboard               Launchpad, MIDI hardware
 ```
 
-**MIDI I/O and Control Surface live inside Controller** because they're capabilities the Controller uses to talk to the outside world, not peer chunks.
-
-### 1.1 Principles
-
-1. **Model is the single source of truth.** All persisted state lives in `model/`. Save = serialize the package. Load = deserialize back. No parallel save/runtime types. Devices and views *read* from Model and (in Controller's case) *mutate* it. They never own state.
-
-2. **Devices are stateless Controllers.** No fields, no cached pointers, no channels. Each device is a value-singleton (`var Drum devices.Drum`) whose methods take state as a parameter. This eliminates the orphaned-pointer footgun in load: swapping `*model.Project` is enough; nothing has to be re-wired.
-
-3. **Devices return Intents, not callbacks.** When a pad press needs to trigger a MIDI preview or queue a pattern on another track, the device returns an Intent value describing what should happen. The Manager interprets and applies. Devices never call back into anything.
-
-4. **Patterns precompute their own events.** Each pattern in Model carries both spec (notes, lengths, velocities) and rendered events (`[]TimedEvent`). Spec is the source of truth and persists; events are runtime-only (`json:"-"`) and regenerate at edit time. Tick loop never computes events — it just walks them.
-
-5. **One code path per concept.** No "swap recovery." No "post-edit handler." The tick loop runs the same logic every tick, regardless of whether anything just changed. The cursor's modular wrap handles every "weird state" by definition.
-
-6. **Naming: package path conveys role, no role suffixes.** `model.Drum` is the data, `controller/devices.Drum` is the behavior. Same domain word in both packages. Go-idiomatic anti-stutter.
+MIDI I/O, Control Surface, and Save/Load all live inside Controller. They're capabilities the Controller uses to do its job, not peer chunks.
 
 ---
 
-## 2. Data flows
+## 3. Principles
 
-### 2.1 Tick (the heartbeat)
+1. **Model is pure data.** No behavior, no I/O. Just structs, JSON tags, and `Validate()` methods that clamp fields to valid ranges.
 
-The tick goroutine runs every ~1ms. It is pure walk and dispatch — no event computation, no regeneration.
+2. **Devices are pure compilers.** No fields, no state, no side effects. Value-singletons (`var Drum devices.Drum`). Method signature: `Compile(human *model.DrumHuman) *model.MachinePattern`.
+
+3. **Input handlers mutate state, then recompile affected patterns.** Step toggle → mutate `Human.Notes` → call `devices.Drum.Compile(&human)` → atomic-swap the new machine pattern. Transport / schedule changes don't need compilation; playback engine reads them directly.
+
+4. **Playback engine is a tape head.** Every tick: read transport → read schedule → read cursor → read current pattern's machine form → dispatch events. All reads.
+
+5. **Input manager routes input.** Receives pad/key/MIDI events. For global commands (play, stop, tempo, save, load), mutates state directly. For device-specific inputs (step toggle, metropolix edit, session pad), routes to the focused device's `HandlePad`/`HandleKey`.
+
+6. **Patterns store both forms.** `DrumPattern` holds a human part (persisted) and a machine part (`json:"-"`, runtime). Atomically swapped as a unit on edit, so tick and view always see a consistent pair.
+
+7. **One code path per concept.** The tick loop runs identical logic every tick regardless of whether anything just changed. Modular-wrap on the cursor handles length changes and pattern swaps for free.
+
+8. **Naming: package path conveys role, no role suffixes.** `model.Drum` is the data, `controller/devices.Drum` is the behavior. Same domain word in both packages.
+
+---
+
+## 4. Data flows
+
+### 4.1 Tick (the tape head)
 
 ```
-wall clock advances → Manager.tick(globalTick):
+clock advances → PlaybackEngine.tick(globalTick):
+    if not state.Transport.Playing: return
     delta = globalTick - lastGlobalTick
     for each track:
-        pattern  = currentPattern(track)             // schedule[cursor.scheduleIdx], atomic load
-        plen     = patternLength(pattern)
-        cursor.Tick %= plen                          // handles any prior length change
-        newTick  = (cursor.Tick + delta) % plen
-        wrapped  = newTick < cursor.Tick
-        for each event in pattern.Events:
-            if event.Tick is in (cursor.Tick, newTick] (split if wrapped):
+        sched   = track.<Kind>.Schedule
+        pattern = track.<Kind>.Patterns[sched.Playing].Load()   // atomic load
+        plen    = patternLength(pattern)
+        cursor.Tick %= plen                                     // handles prior length changes
+        newTick = (cursor.Tick + delta) % plen
+        wrapped = newTick < cursor.Tick
+        for each event in pattern.Machine.Events:
+            if event.Tick in (cursor.Tick, newTick] (split if wrapped):
                 if rollProbability(event.Probability):
                     midi.Send(track.Port, track.Channel, event.Event)
         cursor.Tick = newTick
-        if wrapped:
-            cursor.scheduleIdx = (cursor.scheduleIdx + 1) % len(schedule)
-    surface.SetLEDBatch(devices.<focused>.RenderLEDs(state, project))
+        if wrapped and sched.Queued != -1:
+            sched.Playing = sched.Queued              // boundary promotion
+            sched.Queued  = -1
 ```
 
-Key properties:
-- **No regeneration in tick.** Events are precomputed by the input goroutine. Tick is read-only as far as pattern state.
-- **Atomic pointer load on the pattern.** Tick reads whatever pattern pointer is current. Input may have swapped a pointer between this tick and the last; tick doesn't care.
-- **Cursor stores tick, not event index.** Robust to event-list swaps and pattern length changes.
-- **Modular wrap is unconditional.** No special case for "we just shrank a pattern." Every tick wraps if needed; usually it's a no-op.
+No compilation. No regeneration. Pure walk + dispatch.
 
-### 2.2 Pad press (input → action)
+### 4.2 Pattern edit (compile-triggering input)
 
 ```
-hardware pad → surface.Launchpad reads MIDI bytes
-  → translates to (row, col)
-  → dispatches PadEvent to Manager
-    → Manager looks up focused device + state slice
-      → intents = devices.<focused>.HandlePad(state, project, row, col)
-        → device may mutate spec (state.Patterns[N].Notes[...])
-        → device regenerates events for any mutated pattern (atomic pointer swap)
-        → device returns []Intent describing other side effects
-    → Manager applies each Intent:
-        PreviewNote{track, ev}     → midi.Send(port, channel, ev)
-        QueuePattern{track, p}     → state.<Kind>.Schedule = append(...)
-        SaveProject{name}          → model.SaveProject(project, name)
-        ...
+pad press → surface → InputManager.HandlePad(row, col)
+  → InputManager calls focused device: devices.Drum.HandlePad(state, project, ports, row, col)
+    → device mutates state.Patterns[N].Human (e.g., Notes[lane].Steps[step].Active = true)
+    → device recompiles:
+        new := *state.Patterns[N].Load()         // borrow + copy
+        new.Human.Notes[lane].Steps[step].Active = !new.Human.Notes[lane].Steps[step].Active
+        new.Machine = devices.Drum.Compile(&new.Human)
+        state.Patterns[N].Store(&new)            // atomic swap
+    → return
 ```
 
-Key properties:
-- **Devices are leaves of the call graph.** They mutate state passed in, regenerate affected pattern events, return Intents. They never call into Manager or other devices.
-- **Pattern regeneration happens at edit time, not at tick time.** The device that received the input edits the spec and immediately rebuilds the events for that pattern.
-- **Copy-on-write for events.** Device builds a new `DrumPattern` value, regenerates its `Events`, then `state.Patterns[N].Store(&newPattern)`. Tick goroutine sees old or new — never partial.
+PlaybackEngine reads the new machine pattern from the next tick onward.
 
-### 2.3 Pattern edit and regeneration
+### 4.3 Transport / schedule change (no compile)
 
 ```
-HandleKey/HandlePad call (input goroutine)
-    ↓
-device borrows current pattern pointer:    old := state.Patterns[N].Load()
-device copies it:                          new := *old
-device mutates spec in copy:               new.Notes[lane].Steps[step].Active = true
-device regenerates events:                 new.Events = generateDrumEvents(&new)
-device atomically swaps in:                state.Patterns[N].Store(&new)
-old pattern is garbage-collected when no live readers hold it
+key press → InputManager.HandleKey(key)
+  → InputManager recognizes "space" as play/pause → toggles state.Transport.Playing
+  → return
+
+pad press in Session view → Session.HandlePad(state, project, ports, row, col)
+  → device mutates state.Tracks[row].Drum.Schedule.Queued = col
+  → LED render next frame: pattern-col pad flashes (reads Schedule.Queued)
+  → return
 ```
 
-The tick goroutine is never blocked. Worst case: it sees the old pattern for one tick after a swap, the new pattern from the next tick. ~1ms of staleness, well below human perception.
+No compile called. PlaybackEngine reads `Schedule.Queued` and promotes it to `Schedule.Playing` at the next pattern boundary — which also causes the flashing pad to go solid.
 
-### 2.4 Save / Load
+### 4.4 Preview MIDI (no state, no compile)
 
 ```
-save (input goroutine):
-    user presses save key
-    SaveDevice.HandleKey returns intent: SaveProject{name}
-    Manager: bytes = json.Marshal(*Manager.project); write to disk
+pad press in Drum view, not recording → Drum.HandlePad(state, project, ports, row, col)
+  → device checks state.Drum.Recording == false
+  → device calls ports.Send(track.PortName, track.Channel, midi.Event{note, vel})
+  → return
+```
 
-load (input goroutine):
+Direct send. Input handlers have access to `*midi.Ports` the same way the manager does. No state change, no intent machinery.
+
+### 4.5 Save / Load
+
+```
+save:
+    user presses save key in Save view
+    Save.HandleKey calls controller.SaveProject(project, name)
+    controller.SaveProject: bytes = json.Marshal(project); write to disk
+
+load:
     user picks save file
-    SaveDevice.HandleKey returns intent: LoadProject{path}
-    Manager:
-        project, err := model.LoadProject(path)
-        project.Validate()           // clamp loaded fields to valid ranges
-        Manager.project = project    // single pointer swap
-        regenerate all pattern events // walk every pattern, rebuild Events
-        reset all cursors             // playhead back to start of each schedule
-    next tick uses new state
+    Save.HandleKey calls controller.LoadProject(path)
+    controller.LoadProject:
+        read file, unmarshal into *model.Project
+        call project.Validate()
+        recompile all patterns (walk, call each device's Compile for each pattern)
+        return *model.Project
+    InputManager replaces the shared project state. PlaybackEngine reads the updated state on its next tick. Modular cursor math handles any shape changes (length differences, schedule reshuffles, etc.) — no explicit reset signal needed.
 ```
 
-No device recreation. No `recreateDevicesFromState`. Devices have no cached pointers — swapping `*model.Project` and regenerating events is the entire load operation.
+Save/load lives in `controller/project.go`, not in `model/`. Model is pure data.
 
 ---
 
-## 3. Per-package reference
+## 5. Per-package reference
 
-### 3.1 model/
+### 5.1 model/
 
-Pure data. No behavior beyond `Validate()` (clamps fields to valid ranges) and JSON round-trip helpers. Imports nothing except standard library and `controller/midi` (for `midi.Event`).
+Pure data. No I/O. No behavior beyond `Validate()`.
 
 ```go
 package model
 
 type Project struct {
-    Tempo         int               `json:"tempo"`
-    Tracks        [8]*Track         `json:"tracks"`
-    NoteInputPort string            `json:"noteInputPort,omitempty"`
-    ProjectName   string            `json:"-"`  // runtime only
-    Tick          int64             `json:"-"`  // runtime: global playback tick
-    Playing       bool              `json:"-"`  // runtime: playback active
-    T0            time.Time         `json:"-"`  // runtime: wall-clock reference
+    Tempo      int                  `json:"tempo"`
+    Tracks     [8]*Track            `json:"tracks"`
+    Transport  Transport            `json:"-"`  // runtime
+    Tick       int64                `json:"-"`  // runtime
+}
+
+type Transport struct {
+    Playing bool
+    T0      time.Time
 }
 
 type Track struct {
-    Name       string                       `json:"name"`
-    Channel    uint8                        `json:"channel"`
-    Muted      bool                         `json:"muted"`
-    Solo       bool                         `json:"solo"`
-    PortName   string                       `json:"portName,omitempty"`
-    Type       DeviceKind                   `json:"type"`
-    Kit        string                       `json:"kit,omitempty"`
-    Drum       *Drum                        `json:"drum,omitempty"`
-    Piano      *Piano                       `json:"piano,omitempty"`
-    Metropolix *Metropolix                  `json:"metropolix,omitempty"`
+    Name     string                 `json:"name"`
+    Channel  uint8                  `json:"channel"`
+    PortName string                 `json:"portName,omitempty"`
+    Type     DeviceKind             `json:"type"`
+    Drum       *Drum                `json:"drum,omitempty"`
+    Piano      *Piano               `json:"piano,omitempty"`
+    Metropolix *Metropolix          `json:"metropolix,omitempty"`
 }
 
 type Drum struct {
-    Patterns          [16]atomic.Pointer[DrumPattern]  // copy-on-write
-    Schedule          Schedule                          `json:"schedule"`
-    PlayingPatternIdx int                               `json:"playingPattern"`
-    EditingPatternIdx int                               `json:"editingPattern"`
-    SelectedNoteIdx   int                               `json:"selectedNote"`
-    Cursor            int                               `json:"cursor"`
-    Recording         bool                              `json:"-"`
-    Preview           bool                              `json:"-"`
+    Patterns [16]atomic.Pointer[DrumPattern]    // copy-on-write
+    Schedule Schedule                            `json:"schedule"`
+    PlayingPatternIdx int                        `json:"playingPattern"`
+    EditingPatternIdx int                        `json:"editingPattern"`
+    Recording bool                               `json:"-"`
 }
 
 type DrumPattern struct {
-    Notes  [16]NoteLane    `json:"notes"`
-    Events []TimedEvent    `json:"-"`     // derived from Notes, runtime only
+    Human   DrumHuman       `json:"human"`
+    Machine MachinePattern  `json:"-"`       // derived from Human, runtime only
 }
 
-// Piano, Metropolix similar shape — spec field(s) + Events field, atomic pointers in parent
+type DrumHuman struct {
+    Notes [16]NoteLane
+}
+
+type MachinePattern struct {
+    Events []TimedEvent
+}
 
 type Schedule struct {
-    StartTick int64 `json:"startTick"`
-    Patterns  []int `json:"patterns"`     // pattern indices, in play order
+    Playing int `json:"playing"`  // currently playing pattern (0-15)
+    Queued  int `json:"queued"`   // -1 if none; pattern to promote at next boundary
 }
+// Future: a Chain type (named, reusable sequence of pattern indices) that
+// Schedule.Playing/Queued can also reference via a small kind enum. Deferred to v2.
 
 type TimedEvent struct {
-    Tick        int64       // pattern-relative tick
-    Event       midi.Event  // the MIDI bytes
-    StageID     int         // for grouping (Metropolix probability gates ratchets)
-    Probability uint8       // 0-100, dispatch rolls
+    Tick        int64
+    Event       midi.Event
+    StageID     int     // for grouping (e.g., Metropolix ratchets share a probability gate)
+    Probability uint8   // 0-100, dispatch rolls
 }
 
-func LoadProject(path string) (*Project, error) { ... }
-func SaveProject(p *Project, path string) error { ... }
-func (p *Project) Validate() { ... }       // clamps all fields recursively
+func (p *Project) Validate()  // clamps all fields recursively
 ```
 
-`atomic.Pointer[DrumPattern]` arrays don't auto-marshal — `Drum`/`Piano`/`Metropolix` need custom `MarshalJSON`/`UnmarshalJSON` that load/store the pointers.
+Piano and Metropolix follow the same shape (Human + Machine per pattern, atomic.Pointer per pattern array).
 
-### 3.2 view/
+### 5.2 view/
 
-The user-facing rendering layer. Reads from Model (via Manager accessors), sends keyboard events to Manager. Currently Bubbletea TUI; planned to swap to Wails (Go backend + HTML/JS in system webview) without touching anything else.
+Reads from Model (via Manager accessors), sends keyboard events to Manager. Bubbletea TUI now, Wails later. Doesn't import `model` directly.
 
-```go
-package view
+### 5.3 controller/
 
-type TUI struct {
-    Manager *controller.Manager
-}
-
-func (t *TUI) View() string                    // current screen
-func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd)  // route input to Manager
-```
-
-View never imports `model` directly. Everything goes through `controller.Manager` accessors. This keeps the Wails migration to a single boundary.
-
-### 3.3 controller/
-
-#### controller/manager.go
-
-The engine. Owns the project pointer, the tick loop, the cursors, the goroutines, the MIDI dispatch.
+#### controller/playback.go
 
 ```go
 package controller
 
-type Manager struct {
+type PlaybackEngine struct {
     project *model.Project
     cursors [8]Cursor
-    surface surface.Surface
     ports   *midi.Ports
-    focused FocusTarget        // which device gets keyboard input
-    
-    // goroutine plumbing
-    intents chan Intent        // from input handlers to applier
-    ticks   chan int64         // from clock to tick loop
 }
 
 type Cursor struct {
-    ScheduleIdx int    // which slot of Schedule we're playing
-    Tick        int64  // playhead within current pattern
+    Tick int64   // playback position within the currently-playing pattern
+}
+
+func NewPlaybackEngine(project *model.Project, ports *midi.Ports) *PlaybackEngine
+func (pe *PlaybackEngine) Run(ctx context.Context)             // owns the clock + tick goroutine
+func (pe *PlaybackEngine) ResetCursors()                        // called after project swap
+```
+
+Single goroutine: reads `project` state atomically, walks events, dispatches MIDI via `ports`. Writes only its own cursors + `Project.Tick`.
+
+#### controller/input.go
+
+```go
+package controller
+
+type InputManager struct {
+    project *model.Project
+    ports   *midi.Ports       // for preview MIDI in input handlers
+    surface surface.Surface
+    focused FocusTarget
 }
 
 type FocusTarget struct {
-    Kind  FocusKind  // Track, Settings, Save, Session
-    Track int        // valid when Kind == Track
+    Kind  FocusKind   // Track, Settings, Save, Session
+    Track int         // valid when Kind == Track
 }
 
-func New(project *model.Project, surface surface.Surface, ports *midi.Ports) *Manager
-func (m *Manager) Run(ctx context.Context)               // starts goroutines
-func (m *Manager) HandleKey(key string)                  // from view
-func (m *Manager) HandlePad(row, col int)                // from surface
-func (m *Manager) State() *model.Project                 // accessor for view
-func (m *Manager) Apply(i Intent)                        // applies an intent
+func NewInputManager(project *model.Project, ports *midi.Ports, surface surface.Surface) *InputManager
+func (im *InputManager) Run(ctx context.Context)                // listens to surface.PadEvents()
+func (im *InputManager) HandleKey(key string)                   // called by view
+func (im *InputManager) HandlePad(row, col int)                 // also callable directly (tests)
 ```
 
-Goroutines (set up in `Run`):
-- **clock**: wakes every ~1ms, sends globalTick onto `m.ticks`
-- **tickLoop**: receives ticks, walks events, dispatches MIDI
-- **inputApplier**: receives intents, applies them (mutates state, sends MIDI for previews)
-- **midiInput**: receives MIDI from external sources, fans to focused device
-- **ledRender**: throttled (60fps), reads model + focused device, calls surface.SetLEDBatch
+Receives input events, mutates state (directly or by routing to focused device). Writes spec fields, schedule, transport, and triggers recompilation via device `Compile`.
+
+#### controller/project.go
+
+```go
+package controller
+
+func SaveProject(p *model.Project, path string) error
+func LoadProject(path string) (*model.Project, error)   // reads, unmarshals, Validate, recompiles all patterns
+```
 
 #### controller/devices/
 
-Device implementations. Each is an empty struct with value-receiver methods. No state.
+Each device is an empty struct with value-receiver methods. No fields.
 
 ```go
 package devices
 
 type Drum struct{}
 
-func (Drum) Generate(pattern *model.DrumPattern) []TimedEvent  // pure function
-func (Drum) HandlePad(state *model.Drum, project *model.Project, row, col int) []Intent
-func (Drum) HandleKey(state *model.Drum, project *model.Project, key string) []Intent
-func (Drum) HandleMIDI(state *model.Drum, ev midi.Event) []Intent  // for recording / live input
-func (Drum) Render(state *model.Drum, project *model.Project) string         // TUI string
-func (Drum) RenderLEDs(state *model.Drum, project *model.Project) []LEDState // for surface
+// pure compile
+func (Drum) Compile(human *model.DrumHuman) *model.MachinePattern
+
+// input handlers — mutate state directly; recompile by calling own Compile
+func (Drum) HandlePad(state *model.Drum, project *model.Project, ports *midi.Ports, row, col int)
+func (Drum) HandleKey(state *model.Drum, project *model.Project, ports *midi.Ports, key string)
+func (Drum) HandleMIDI(state *model.Drum, ports *midi.Ports, ev midi.Event)
+
+// view helpers
+func (Drum) Render(state *model.Drum, project *model.Project) string
+func (Drum) RenderLEDs(state *model.Drum, project *model.Project) []surface.LED
 ```
 
-Same shape for `Piano`, `Metropolix`, `Session`, `Settings`, `Empty`. `Session` and `Settings` don't have `Generate` (they don't sequence patterns); their queue methods are no-ops or absent.
-
-Two interfaces, both satisfied by each device type:
-
-```go
-type Sequencer interface {
-    Generate(pattern any) []model.TimedEvent  // (any here is sketchy; see open question 3)
-    HandleMIDI(state any, ev midi.Event) []Intent
-}
-
-type UI interface {
-    Render(state any, project *model.Project) string
-    RenderLEDs(state any, project *model.Project) []LEDState
-    HandleKey(state any, project *model.Project, key string) []Intent
-    HandlePad(state any, project *model.Project, row, col int) []Intent
-}
-```
-
-(See open question on how to handle the `any` typing in interfaces given each device has a different state type.)
+Same shape for `Piano`, `Metropolix`, `Session`, `Settings`, `Empty`. Session/Settings don't have `Compile` (they don't sequence patterns).
 
 #### controller/midi/
-
-OS MIDI port management. Send/receive raw MIDI bytes via gomidi.
 
 ```go
 package midi
 
 type Event struct {
-    Type     EventType  // NoteOn, NoteOff, CC, ProgramChange, ...
+    Type     EventType
     Note     uint8
     Velocity uint8
-    Channel  uint8      // 1-16
+    Channel  uint8
     // ...
 }
 
 type Ports struct { ... }
 
 func NewPorts() (*Ports, error)
-func (p *Ports) Send(portName string, ev Event) error
+func (p *Ports) Send(portName string, channel uint8, ev Event) error
 func (p *Ports) Subscribe(portName string) (<-chan Event, error)
-func (p *Ports) ListPorts() []PortInfo
+func (p *Ports) List() []PortInfo
 ```
 
 #### controller/surface/
-
-Hardware control surfaces. Currently just Launchpad X. Interface lets us mock for tests.
 
 ```go
 package surface
 
 type Surface interface {
-    PadEvents() <-chan PadEvent  // pad presses streamed here
-    SetLEDBatch(leds []LEDState) // set all 64 pad LEDs
+    PadEvents() <-chan PadEvent
+    SetLEDs(leds []LED)
     Close() error
 }
 
 type PadEvent struct {
     Row, Col int
-    Down     bool  // true on press, false on release
+    Down     bool
 }
 
-type LEDState struct {
-    Row, Col   int
-    R, G, B    uint8  // semantic RGB; surface maps to hardware
+type LED struct {
+    Row, Col int
+    R, G, B  uint8  // semantic; surface maps to hardware
 }
 
-type Launchpad struct { ... }     // implements Surface for Novation Launchpad X
-type Mock struct { ... }          // for tests; records LED batches, exposes injection of pad events
+type Launchpad struct { ... }
+type Mock struct { ... }
 ```
 
 ---
 
-## 4. Intent vocabulary
+## 6. Concurrency model
 
-Intents are values returned by devices that describe side effects the manager should apply. Adding a new kind of side effect = adding a new Intent type and a case in the applier.
+Goroutines share `*model.Project`:
 
-```go
-package controller
+| Goroutine                       | Reads                                      | Writes                                           |
+|---------------------------------|--------------------------------------------|--------------------------------------------------|
+| PlaybackEngine.Run              | pattern.Machine (atomic), Schedule, Tracks, Transport | cursors (own), Project.Tick, Schedule.Playing/Queued at boundary |
+| InputManager.Run                | surface pad events                         | patterns (atomic swap via device Compile), spec, Schedule.Queued, transport |
+| InputManager.HandleKey (view)   | everything                                 | same as InputManager.Run                         |
 
-type Intent interface{ isIntent() }  // sealed interface (marker method)
+- **Pattern swaps**: `atomic.Pointer[DrumPattern]`. Lock-free reads; atomic swap on write.
+- **Non-pattern state** (schedule, transport, track config): `sync.RWMutex` on Project.
+- **Cursors**: owned by PlaybackEngine. Not shared.
+- **Project.Tick, Project.Transport.Playing**: `atomic.Int64` and `atomic.Bool`.
 
-// audio side effects
-type PreviewNote struct {
-    Track int
-    Event midi.Event
-}
-
-// schedule mutations
-type QueuePattern struct {
-    Track   int
-    Pattern int
-    AtTick  int64  // 0 = next pattern boundary
-}
-type ClearQueue struct {
-    Track int
-}
-
-// project lifecycle
-type SaveProject struct { Name string }
-type LoadProject struct { Path string }
-type NewProject  struct { Name string }
-
-// playback
-type Play  struct{}
-type Stop  struct{}
-type SetTempo struct { BPM int }
-```
-
-What's NOT an Intent:
-- **Focus changes** — the Manager handles these directly from key dispatch. Devices don't request focus.
-- **Pattern spec edits** — devices mutate spec in place (under copy-on-write); they don't return intents for "I edited this." The atomic swap is the side effect.
-- **MIDI dispatch from sequencer events** — happens in tick loop, not via intents.
+Single-writer principle per field, with one narrow exception: PlaybackEngine writes `Schedule.Playing` and clears `Schedule.Queued` at pattern boundaries (the boundary promotion). `Schedule.Queued` is otherwise written by InputManager (user queueing). Both writes happen under the project RWMutex to coordinate.
 
 ---
 
-## 5. Concurrency model
+## 7. Open questions
 
-Three main goroutines share `*model.Project`:
-
-| Goroutine     | Reads               | Writes                                                |
-|---------------|---------------------|-------------------------------------------------------|
-| tickLoop      | pattern.Events (atomic), Schedule, Tracks | cursors (own), Tick                                  |
-| inputApplier  | everything          | spec fields, pattern.Events (atomic swap), Schedule  |
-| midiInput     | focused device state| forwards events to inputApplier via intents         |
-
-Synchronization:
-- **`pattern.Events`**: atomic.Pointer[DrumPattern] etc. Lock-free reads; atomic swap on write.
-- **Spec fields** (Notes, Schedule, etc.): mutated only by inputApplier. tickLoop reads these — needs `sync.RWMutex` or "read snapshot" pattern. Practically: a single `sync.RWMutex` on Project, with inputApplier taking write lock briefly per intent. Tick takes read lock per tick.
-- **Cursors**: owned by Manager (in tickLoop). No shared access.
-- **`Project.Tick`, `Project.Playing`**: written by tickLoop, read by everyone. `atomic.Int64` and `atomic.Bool`.
-
-**Single-writer principle**: pattern events are written only by inputApplier, never by tickLoop. Cursor state is written only by tickLoop, never by inputApplier. Schedule is written only by inputApplier.
+1. **Device interface typing** — each device has its own state type. A unified `Device` interface needs `any` + runtime assertions, or we drop the interface and use type switches in the manager. Leaning type switches.
+2. **Persisting machine patterns** — currently `json:"-"`, regenerated on load. Alternative: persist them, skip regen. Default: regenerate on load.
+3. **Save format compatibility** — the restructure breaks JSON tags (e.g., new `human` nesting). Pre-1.0; break is acceptable.
+4. **Clock goroutine back-pressure** — channel-based tick can drop ticks. Consider a timer-in-tickLoop design instead.
 
 ---
 
-## 6. Open questions
+## 8. Out of scope (future work)
 
-These need decisions before implementation lands the corresponding piece.
-
-1. **Device interface typing** — Each device has its own state type (`*model.Drum`, `*model.Piano`, ...). A unified `Sequencer`/`UI` interface needs `any` and runtime type assertions, OR we drop the unified interfaces and use type switches in the manager (manager knows which device kind goes with which state type, so it can dispatch directly). The latter is uglier-looking but type-safe. Worth deciding.
-
-2. **Persisting the pattern's compiled `Events`** — currently spec'd as `json:"-"` so events regenerate on load. Alternative: persist them and skip regeneration on load (faster, but risks stale events if the generator algorithm ever changes). Default: `json:"-"`, regenerate on load. OK?
-
-3. **Save format compatibility** — restructure breaks JSON tags by definition (e.g., `DrumState` → `Drum` changes nothing, but `Schedule` is new and `DrumSchedule` was never persisted). Acceptable to break? Pre-1.0, probably yes.
-
-4. **Goroutine ownership of ticks** — clock-as-goroutine sending on `m.ticks` channel means the tick channel can drop ticks under back-pressure (bad). Alternative: clock fires a callback synchronously in the tickLoop goroutine via a timer. Worth thinking about.
-
-5. **Wails timing** — restructure first, then Wails. Wails swap is a separate effort that touches only the View boundary.
-
----
-
-## 7. Out of scope (future work)
-
-- **Multi-controller support** — multiple Launchpads, or other surfaces (Push, MK3). The `Surface` interface admits this; no work today.
-- **VST hosting** — explicitly not a DAW; out of scope.
-- **Audio output** — go-sequence is MIDI only. Hook to a softsynth (FluidSynth, Bitwig, etc.) for sound.
-- **Pattern chaining beyond Schedule** — Schedule is the chain mechanism. Polyrhythmic per-track schedules are inherent (each track has its own).
-- **Network sync (MIDI clock out)** — eventually, not now.
+- **Named pattern chains** ("meta-patterns") — reusable sequences of patterns that queue as a single unit (e.g., "Chorus" = [D, E, F]). Schedule extends cleanly to reference either a pattern or a chain via a small kind enum. Deferred to v2.
+- Multi-controller support (`Surface` interface admits this).
+- VST hosting (not a DAW).
+- Audio output (MIDI only; route to softsynth for sound).
+- MIDI clock out (eventually).
