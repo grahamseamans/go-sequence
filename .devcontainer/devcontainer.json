@@ -10,10 +10,6 @@
       "GOLANG_VERSION": "1.25.4"
     }
   },
-  "runArgs": [
-    "--cap-add=NET_ADMIN",
-    "--cap-add=NET_RAW"
-  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -68,7 +64,5 @@
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
-  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
-  "postAttachCommand": "cd ~/dotfiles && git pull --ff-only && ./install.sh",
-  "waitFor": "postStartCommand"
+  "postAttachCommand": "cd ~/dotfiles && git pull --ff-only && ./install.sh"
 }
