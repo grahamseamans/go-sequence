@@ -1,7 +1,7 @@
 package empty
 
 import (
-	"go-sequence/controller/surface"
+	"go-sequence/view/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
 )

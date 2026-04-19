@@ -46,7 +46,7 @@ import (
 	"go-sequence/controller/devices/save"
 	"go-sequence/controller/devices/session"
 	"go-sequence/controller/devices/settings"
-	"go-sequence/controller/surface"
+	"go-sequence/view/surface"
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"

@@ -4,7 +4,7 @@ import (
 	"sort"
 
 	"go-sequence/controller/devices/rng"
-	"go-sequence/controller/surface"
+	"go-sequence/view/surface"
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
