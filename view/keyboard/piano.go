@@ -16,10 +16,13 @@ const pianoMinNoteDurationBeats = 0.25
 // Two modes:
 //
 //  1. Not recording: preview. Send the event straight through to the track's
-//     output so the user hears what they played.
-//  2. Recording: append a NoteEvent at the current playback beat with a
-//     fixed 1-beat duration (first-pass simplification — we don't thread
-//     note-off back to the note's Duration yet).
+//     output so the user hears what they played. Both NoteOn and NoteOff
+//     are forwarded so the note has a matching release.
+//  2. Recording: capture NoteOn/NoteOff pairs. On NoteOn, we stash the
+//     start beat and attack velocity in track.Piano.Pending (keyed by
+//     pitch). On NoteOff (or NoteOn vel=0) we close the pending note —
+//     Duration = currentBeat - startBeat, floored to
+//     pianoMinNoteDurationBeats — and append to pat.Notes.
 //
 // Caller (HandleMIDI in keyboard.go) holds track.Lock and calls
 // MarkTrackDirty after we return, so we only mutate spec here.
@@ -32,19 +35,12 @@ func pianoMIDI(track *model.Track, project *model.Project, trackIdx int, out mid
 	}
 	state := track.Piano
 
-	// Not recording: preview this event straight through. Forward NoteOn and
-	// NoteOff both so the user hears the full gesture.
+	// Not recording — preview this event straight through. Forward NoteOn
+	// and NoteOff both so the user hears the full gesture (press+release).
 	if !state.Recording {
 		if ev.Type == midi.NoteOn || ev.Type == midi.NoteOff {
 			_ = out.Send(track.PortName, track.Channel, ev)
 		}
-		return
-	}
-
-	// Recording: only react to note-on with positive velocity. A note-on
-	// with velocity 0 is a note-off encoded in running status; both get
-	// dropped in this first pass (see TODO below on duration).
-	if ev.Type != midi.NoteOn || ev.Velocity == 0 {
 		return
 	}
 
@@ -53,41 +49,82 @@ func pianoMIDI(track *model.Track, project *model.Project, trackIdx int, out mid
 		return
 	}
 
-	// Write-head = current playback beat within the editing pattern. If the
-	// pattern isn't compiled yet, or we can't find the cursor, fall back to
-	// CenterBeat — deterministic even when the transport is idle.
-	start := pianoPlaybackBeat(track, project, trackIdx)
-	if start < 0 {
-		start = state.CenterBeat
-	}
-	if start < 0 {
-		start = 0
-	}
+	// Recording — treat NoteOn vel=0 as NoteOff (running-status encoding).
+	isNoteOn := ev.Type == midi.NoteOn && ev.Velocity > 0
+	isNoteOff := ev.Type == midi.NoteOff || (ev.Type == midi.NoteOn && ev.Velocity == 0)
 
-	// TODO: duration-from-note-off. For now we use a fixed 1 beat and clamp
-	// to what fits in the pattern; lower bound is pianoMinNoteDurationBeats.
-	dur := 1.0
-	if start+dur > pat.Length {
-		dur = pat.Length - start
-	}
-	if dur < pianoMinNoteDurationBeats {
-		dur = pianoMinNoteDurationBeats
-	}
-	if start+dur > pat.Length {
-		// Pattern is shorter than the minimum note — bail rather than
-		// writing a zero/negative-duration event.
+	if !isNoteOn && !isNoteOff {
 		return
 	}
 
-	pat.Notes = append(pat.Notes, devices.NoteEvent{
-		Start:    start,
-		Duration: dur,
-		Pitch:    ev.Note,
-		Velocity: ev.Velocity,
-	})
-	sort.SliceStable(pat.Notes, func(i, j int) bool {
-		return pat.Notes[i].Start < pat.Notes[j].Start
-	})
+	// Writer head for both NoteOn (StartBeat) and NoteOff (EndBeat): the
+	// current playback position. If the pattern isn't playing, fall back
+	// to CenterBeat so the gesture still lands somewhere deterministic.
+	beat := pianoPlaybackBeat(track, project, trackIdx)
+	if beat < 0 {
+		beat = state.CenterBeat
+	}
+	if beat < 0 {
+		beat = 0
+	}
+
+	if state.Pending == nil {
+		state.Pending = make(map[uint8]devices.PianoPending)
+	}
+
+	switch {
+	case isNoteOn:
+		// Stash start + attack velocity. If a NoteOn arrives while a note
+		// of the same pitch is still pending (e.g. retrigger without
+		// NoteOff), drop the stale one on the floor by overwriting — the
+		// alternative is a dangling pending forever.
+		state.Pending[ev.Note] = devices.PianoPending{
+			StartBeat: beat,
+			Velocity:  ev.Velocity,
+		}
+
+	case isNoteOff:
+		pending, ok := state.Pending[ev.Note]
+		if !ok {
+			// NoteOff without a matching NoteOn (arrived during recording
+			// start, from a pre-existing held key, etc.). Nothing to close.
+			return
+		}
+		delete(state.Pending, ev.Note)
+
+		duration := beat - pending.StartBeat
+		if duration < pianoMinNoteDurationBeats {
+			duration = pianoMinNoteDurationBeats
+		}
+
+		start := pending.StartBeat
+		if start < 0 {
+			start = 0
+		}
+		if start >= pat.Length {
+			// Pending started past the end of the pattern — can happen if
+			// playback looped around past NoteOn. Drop.
+			return
+		}
+		if start+duration > pat.Length {
+			duration = pat.Length - start
+		}
+		if duration < pianoMinNoteDurationBeats {
+			// Pattern is shorter than the minimum note — bail rather than
+			// writing a zero/negative-duration event.
+			return
+		}
+
+		pat.Notes = append(pat.Notes, devices.NoteEvent{
+			Start:    start,
+			Duration: duration,
+			Pitch:    ev.Note,
+			Velocity: pending.Velocity,
+		})
+		sort.SliceStable(pat.Notes, func(i, j int) bool {
+			return pat.Notes[i].Start < pat.Notes[j].Start
+		})
+	}
 }
 
 // pianoPlaybackBeat returns the current playback position (in beats) within

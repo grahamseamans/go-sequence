@@ -30,11 +30,26 @@ type DrumPattern struct {
 	Machine [2]atomic.Pointer[CompiledPattern] `json:"-"`
 }
 
+// ConfirmKind values for the drum view's confirm-dialog. Zero is "no
+// dialog active", non-zero values select which destructive action the y-key
+// should run. The dialog itself lives in the Drum struct (transient UI
+// state) — see the ConfirmKind/ConfirmMsg fields.
+const (
+	ConfirmNone         = 0
+	ConfirmClearNote    = 1
+	ConfirmClearPattern = 2
+)
+
 // Drum is the persisted per-track drum device spec.
 //
 // Patterns holds pointers so each DrumPattern (which contains non-copyable
 // atomic.Pointer fields in Machine) lives at a stable heap address. Never
 // copy a *DrumPattern by value; always operate through the pointer.
+//
+// Preview, ConfirmKind, ConfirmMsg are transient UI state — not persisted.
+// Preview toggles MIDI-thru for the keyboard/launchpad lane-select pads.
+// ConfirmKind / ConfirmMsg implement a tiny modal dialog used to guard
+// destructive actions (clear-lane, clear-pattern) in the TUI.
 type Drum struct {
 	Patterns          [NumPatterns]*DrumPattern `json:"patterns"`
 	Schedule          Schedule                  `json:"schedule"`
@@ -42,6 +57,9 @@ type Drum struct {
 	SelectedNoteIdx   int                       `json:"selectedNote"`
 	Cursor            int                       `json:"cursor"`
 	Recording         bool                      `json:"-"`
+	Preview           bool                      `json:"-"`
+	ConfirmKind       int                       `json:"-"`
+	ConfirmMsg        string                    `json:"-"`
 }
 
 // Validate clamps Drum fields into valid ranges and fills in defaults.

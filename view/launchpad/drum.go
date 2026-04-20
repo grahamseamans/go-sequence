@@ -6,40 +6,48 @@ import (
 	"go-sequence/model/devices"
 )
 
-// drum-view colors. The old launchpad render used pulse/blink channels; the
-// new LED type is pure RGB so everything is static (what-you-see-is-what-you-
-// get). Bright colors scale to the step's velocity at render time.
+// drum-view colors. Ported from the old sequencer/drum.go RenderLEDs. The
+// old code drove launchpad pulse/flash channels via midi.ChannelPulse for
+// things like the playhead; the new LED type is pure RGB (what-you-see-is-
+// what-you-get), so anything that used to pulse is a bright static color
+// here. If the launchpad-native pulse gets plumbed through later, these
+// cells are the ones to promote.
 var (
-	drumStepOff      = LED{R: 20, G: 20, B: 20}    // dim grey: inactive step
-	drumStepOn       = LED{R: 255, G: 100, B: 0}   // orange: active step
-	drumLaneMarker   = LED{R: 0, G: 100, B: 255}   // blue: selected-lane indicator
-	drumPlayheadCol  = LED{R: 255, G: 255, B: 255} // white: playing-step column overlay
-	drumLaneHasHits  = LED{R: 100, G: 40, B: 80}   // magenta-ish: lane has any active step
-	drumLaneEmpty    = LED{R: 30, G: 12, B: 22}    // dim magenta: lane is empty
-	drumLaneSelected = LED{R: 255, G: 255, B: 255} // white: currently selected lane
-	drumCmdClearLane = LED{R: 180, G: 50, B: 50}   // red-ish: clear-lane command
-	drumCmdClearPat  = LED{R: 220, G: 40, B: 40}   // brighter red: clear-pattern command
-	drumCmdRecordOff = LED{R: 60, G: 0, B: 0}      // dim red: record-arm (off)
-	drumCmdRecordOn  = LED{R: 255, G: 0, B: 0}     // bright red: record-arm (on)
+	drumStepsColor     = LED{R: 234, G: 73, B: 116}  // active step
+	drumStepsEmpty     = LED{R: 80, G: 30, B: 50}    // inactive step
+	drumNoteHasContent = LED{R: 148, G: 18, B: 126}  // lane has any hit
+	drumNoteEmpty      = LED{R: 40, G: 10, B: 30}    // lane is empty
+	drumNoteSelected   = LED{R: 255, G: 255, B: 255} // selected lane (white)
+	drumCommandsColor  = LED{R: 253, G: 157, B: 110} // default command pad
+	drumPlayheadColor  = LED{R: 255, G: 255, B: 255} // playhead (was pulse)
+	drumPreviewActive  = LED{R: 0, G: 255, B: 0}     // preview armed
+	drumRecordActive   = LED{R: 255, G: 0, B: 0}     // record armed
+	drumOffColor       = LED{R: 0, G: 0, B: 0}       // beyond pattern length
 )
 
 // drumPad handles a pad press or release on the drum view.
 //
-// Layout (matches the old sequencer/drum.go HandlePad, minus preview/copy/
-// length command rows which the new model doesn't support yet):
+// Layout (ported verbatim from old sequencer/drum.go HandlePad — see
+// renderLaunchpadHelp there for the legend):
 //
-//	rows 4-7 (top half):       step toggles for the selected lane.
-//	                           pad at (row, col) == step (7-row)*8 + col.
-//	rows 0-3, cols 0-3:        lane select (4x4 = 16 lanes).
-//	                           pad at (row, col) == lane row*4 + col.
-//	rows 0-3, cols 4-7:        command pads (see switch below).
+//	rows 4-7:           step toggles for the selected lane.
+//	                    pad at (row, col) == step (7-row)*8 + col.
+//	rows 0-3, cols 0-3: lane select (4x4 = 16 lanes).
+//	                    pad at (row, col) == lane row*4 + col.
+//	                    If Preview: also sends a live preview note.
+//	                    If Recording && Playing: also toggles the step
+//	                    at the current playhead.
+//	rows 0-3, cols 4-7: command pads.
+//	                    (0, 4) = clear lane (no confirm here; pad UX)
+//	                    (0, 5) = clear pattern (no confirm here)
+//	                    (3, 4) = preview toggle
+//	                    (3, 5) = record toggle
+//	                    Other command cells (copy/paste/nudge/length etc.)
+//	                    are left as visual hints only — not wired, matching
+//	                    the old code which also stopped short on those.
 //
 // Caller (HandlePad in launchpad.go) holds track.Lock and calls
 // MarkTrackDirty after this returns; we just mutate spec.
-//
-// TODO: paging. This shows lanes 0-15 directly on the 4x4 lane grid and
-// steps 0-31 on the 4x8 step grid — there's no view offset yet. A later
-// pass can add horizontal paging if 32 steps need finer-grained editing.
 func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
@@ -68,7 +76,7 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 		return
 	}
 
-	// Bottom-left 4x4: lane select (+ preview + record-arm edit).
+	// Bottom-left 4x4: lane select (+ preview + record-while-playing).
 	if row < 4 && col < 4 {
 		laneIdx := row*4 + col
 		if laneIdx < 0 || laneIdx >= 16 {
@@ -76,22 +84,29 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 		}
 		state.SelectedNoteIdx = laneIdx
 
-		// Preview: send this lane's drum note directly. Always — pad taps
-		// on a lane-select pad are audible regardless of record-arm.
-		kit := devices.GetKit(track.Kit)
-		_ = out.Send(track.PortName, track.Channel, midi.Event{
-			Type:     midi.NoteOn,
-			Note:     kit.Notes[laneIdx],
-			Velocity: 100,
-		})
+		// Preview: send this lane's drum note if Preview mode is armed.
+		if state.Preview {
+			kit := devices.GetKit(track.Kit)
+			_ = out.Send(track.PortName, track.Channel, midi.Event{
+				Type:     midi.NoteOn,
+				Note:     kit.Notes[laneIdx],
+				Velocity: 100,
+			})
+		}
 
-		// Record-arm: also write the hit into the editing pattern at the
-		// cursor. Playback tick isn't plumbed to input today, so we use
-		// the cursor as the write-head (same choice as drumMIDI).
-		if state.Recording {
-			s := &pat.Notes[laneIdx].Steps[state.Cursor]
-			s.Active = true
-			s.Velocity = 100
+		// Record-while-playing: if recording and transport is running, toggle
+		// the step at the current playhead. Matches the old UX: tapping a
+		// lane pad while armed "records" the hit at the live playback
+		// position (derived from globalTick, not from the edit cursor).
+		if state.Recording && project.Playback.Playing.Load() {
+			playingStep := drumPlayingStep(track, project)
+			if playingStep >= 0 && playingStep < 32 {
+				s := &pat.Notes[laneIdx].Steps[playingStep]
+				s.Active = !s.Active
+				if s.Active && s.Velocity == 0 {
+					s.Velocity = 100
+				}
+			}
 		}
 		return
 	}
@@ -109,6 +124,8 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 					pat.Notes[l].Steps[s] = devices.DrumStep{}
 				}
 			}
+		case row == 3 && col == 4: // preview toggle
+			state.Preview = !state.Preview
 		case row == 3 && col == 5: // record arm toggle
 			state.Recording = !state.Recording
 		}
@@ -118,16 +135,18 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 
 // drumLEDs renders the 8x8 LED frame for the drum view.
 //
-// Layout mirrors drumPad:
+// Layout mirrors drumPad (ported from old sequencer/drum.go RenderLEDs):
 //
 //	rows 4-7:            steps 0-31 of the selected lane. Active steps
-//	                     scale by velocity; inactive steps dim. The
-//	                     currently-playing step lights white.
+//	                     lit, inactive dim, playing step white, steps
+//	                     beyond the pattern length blacked out.
 //	rows 0-3, cols 0-3:  lane grid. Selected lane white; lanes with any
-//	                     active step in the editing pattern get the
-//	                     "has hits" tint; empty lanes dim.
-//	rows 0-3, cols 4-7:  command pads — clear-lane, clear-pattern,
-//	                     record-arm (lit when armed).
+//	                     active step tinted "has content"; empty lanes
+//	                     very dim.
+//	rows 0-3, cols 4-7:  command pads — clear-lane, clear-pattern, plus
+//	                     a block of reserved cells lit with the default
+//	                     command color. Preview (3,4) and Record (3,5)
+//	                     light bright green/red when armed.
 func drumLEDs(track *model.Track, project *model.Project) []LED {
 	if track == nil || track.Drum == nil {
 		return nil
@@ -139,6 +158,13 @@ func drumLEDs(track *model.Track, project *model.Project) []LED {
 	}
 
 	playingStep := drumPlayingStep(track, project)
+	patternSteps := pat.Length / (devices.PPQ / 4)
+	if patternSteps < 1 {
+		patternSteps = 1
+	}
+	if patternSteps > 32 {
+		patternSteps = 32
+	}
 
 	leds := make([]LED, 0, 64)
 
@@ -148,14 +174,15 @@ func drumLEDs(track *model.Track, project *model.Project) []LED {
 		for col := 0; col < 8; col++ {
 			stepIdx := (7-row)*8 + col
 			var c LED
-			step := &selectedLane.Steps[stepIdx]
-			if step.Active {
-				c = drumScaleLED(drumStepOn, step.Velocity)
-			} else {
-				c = drumStepOff
-			}
-			if playingStep >= 0 && stepIdx == playingStep {
-				c = drumPlayheadCol
+			switch {
+			case stepIdx >= patternSteps:
+				c = drumOffColor // beyond pattern length
+			case stepIdx == playingStep:
+				c = drumPlayheadColor // was pulse in old code
+			case selectedLane.Steps[stepIdx].Active:
+				c = drumStepsColor
+			default:
+				c = drumStepsEmpty
 			}
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
@@ -168,49 +195,32 @@ func drumLEDs(track *model.Track, project *model.Project) []LED {
 			var c LED
 			switch {
 			case laneIdx == state.SelectedNoteIdx:
-				c = drumLaneSelected
+				c = drumNoteSelected
 			case drumLaneHasAnyHit(&pat.Notes[laneIdx]):
-				c = drumLaneHasHits
+				c = drumNoteHasContent
 			default:
-				c = drumLaneEmpty
+				c = drumNoteEmpty
 			}
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
 	}
 
-	// Selected-lane row indicator on the right side: light col 4 on the
-	// row that corresponds to the selected lane's row-group. Cheap visual
-	// hint that the "top half shows steps for THIS lane".
-	selRow := state.SelectedNoteIdx / 4
-	leds = append(leds, LED{Row: selRow, Col: 4, R: drumLaneMarker.R, G: drumLaneMarker.G, B: drumLaneMarker.B})
-
-	// Command pads on rows 0..3, cols 5..7.
-	// row 0, col 5: clear lane
-	leds = append(leds, LED{Row: 0, Col: 5, R: drumCmdClearLane.R, G: drumCmdClearLane.G, B: drumCmdClearLane.B})
-	// row 0, col 6: clear pattern
-	leds = append(leds, LED{Row: 0, Col: 6, R: drumCmdClearPat.R, G: drumCmdClearPat.G, B: drumCmdClearPat.B})
-	// row 3, col 5: record arm (lit brightly when armed, dim when not)
-	rec := drumCmdRecordOff
-	if state.Recording {
-		rec = drumCmdRecordOn
+	// Command pads on rows 0..3, cols 4..7. Default to the command color;
+	// the two toggles (preview, record) override bright when armed.
+	for row := 0; row < 4; row++ {
+		for col := 4; col < 8; col++ {
+			c := drumCommandsColor
+			if row == 3 && col == 4 && state.Preview {
+				c = drumPreviewActive
+			}
+			if row == 3 && col == 5 && state.Recording {
+				c = drumRecordActive
+			}
+			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
+		}
 	}
-	leds = append(leds, LED{Row: 3, Col: 5, R: rec.R, G: rec.G, B: rec.B})
 
 	return leds
-}
-
-// drumScaleLED scales an LED color by a 0..127 velocity. Velocity 0 yields
-// the dim "off" color; velocity 127 yields the full-brightness color.
-func drumScaleLED(base LED, velocity uint8) LED {
-	v := float64(velocity) / 127.0
-	if v < 0.2 {
-		v = 0.2 // even very-quiet hits should be visible
-	}
-	return LED{
-		R: uint8(float64(base.R) * v),
-		G: uint8(float64(base.G) * v),
-		B: uint8(float64(base.B) * v),
-	}
 }
 
 // drumLaneHasAnyHit returns true iff any step in the lane is active.
@@ -226,14 +236,15 @@ func drumLaneHasAnyHit(lane *devices.NoteLane) bool {
 // drumPlayingStep returns the step index (0..31) currently being played on
 // this track, or -1 if the pattern hasn't compiled yet or playback is idle.
 //
-// Computation (see task brief): pos = globalTick - cursor.T0Tick; reduce
-// into the current pattern's compiled length; divide by ticksPerStep.
+// Unlike the TUI's drumPlayingStep (which hides the playhead when the user
+// is editing a different pattern than the one playing), this returns a
+// step for any editing-pattern state — the launchpad step row shows the
+// editing pattern, and a playing-but-not-editing pattern naturally has no
+// visible playhead because the row shows a different lane set of steps.
 func drumPlayingStep(track *model.Track, project *model.Project) int {
 	if track.Drum == nil {
 		return -1
 	}
-	// Resolve the playing pattern's compiled slot. If it's nil we haven't
-	// compiled yet — return -1 so the LED highlight skips the playhead.
 	playingIdx := track.Drum.Schedule.Playing
 	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
 		return -1
@@ -242,14 +253,10 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	if playingPat == nil {
 		return -1
 	}
-	// Find the track's cursor. The project has Cursors[8] — we need the
-	// track's own index, which we don't have as a parameter here. Lift it
-	// from the UI focus since drumLEDs is only called when this drum is
-	// the focused track.
+	// Resolve the track's index in project.Tracks; prefer the UI focus as
+	// a fast path, fall back to linear search if it doesn't line up.
 	trackIdx := project.UI.Focus.Track
 	if trackIdx < 0 || trackIdx >= 8 || project.Tracks[trackIdx] != track {
-		// Focus doesn't match — fall back to a linear search. Cheap; 8
-		// tracks max.
 		trackIdx = -1
 		for i := 0; i < 8; i++ {
 			if project.Tracks[i] == track {

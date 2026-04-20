@@ -27,39 +27,71 @@ var metropolixNoteNames = [...]string{
 	"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 }
 
+// metropolixPageNames is the display name for each of the 8 Launchpad pages.
+// Indexed by spec.Page.
+var metropolixPageNames = [...]string{
+	"Main", "Octave", "Pulse", "Ratchets",
+	"Probability", "Gate", "Accumulator", "Settings",
+}
+
+// metropolixAccumSubPageNames is the display name for each accumulator
+// sub-page. Indexed by spec.AccumSubPage.
+var metropolixAccumSubPageNames = [...]string{"Value", "Reset", "Mode"}
+
+// metropolixAccumModeNames is the display name for each accumulator mode.
+// Indexed by stage.AccumMode (0..2).
+var metropolixAccumModeNames = [...]string{"Reset", "PingPong", "Hold"}
+
+// metropolixGateLengthNames is the display name for each gate length index.
+// Indexed by stage.GateLength (0..5).
+var metropolixGateLengthNames = [...]string{"Trg", "1/16", "1/8", "1/4", "1/2", "Full"}
+
 // metropolixKey handles a keystroke on the Metropolix TUI view.
 //
 // Caller (HandleKey in tui.go) holds track.Lock and calls MarkTrackDirty
-// after this returns. We just mutate spec.
+// after this returns.
 //
-// Keybindings (per task spec):
+// Keybindings preserved (modulo conflicts with the new global hotkeys —
+// space/+/=/-/1-8/,/S/tab are all consumed by tui.go before we see them):
 //
 //	h / left             select previous stage
 //	l / right            select next stage
-//	j / down             pitch down (Note--; rolls to prev octave at 0)
-//	k / up               pitch up   (Note++; rolls to next octave at 7)
-//	g                    toggle gate on the selected stage
+//	j / down             pitch down (Note--; rolls into prev octave at 0)
+//	k / up               pitch up   (Note++; rolls into next octave at 7)
+//	g                    toggle gate on the selected stage (was space)
 //	s                    toggle slide on the selected stage
-//	[                    length --
-//	]                    length ++
-//	<  or ,              previous scale  (wrap)
-//	>  or .              next scale      (wrap)
-//	-                    root note --
-//	+  or =              root note ++
-//	p                    probability -10 (clamped 0..100)
-//	P                    probability +10
-//	r                    ratchets --    (clamped 1..8)
-//	R                    ratchets ++
-//	m                    cycle playback mode (Forward / Reverse / Pendulum / Random)
-//	{  or n              previous editing pattern
-//	}  or N              next editing pattern
+//	r / R                ratchets -/+    (clamped 1..8)
+//	p / P                probability -/+10  (clamped 0..100)
+//	a / A                accumulator -/+    (clamped -4..+3)
+//	u / U                pulse count -/+    (clamped 1..8)
+//	o / O                octave      -/+    (clamped 0..7)
+//	[  /  ]              length -/+
+//	<  or .              next scale (wrap)         (',' is a global hotkey)
+//	>                    next scale  — alias for '.'
+//	z                    root note --             ('-' is a global hotkey)
+//	x                    root note ++
+//	m                    cycle playback mode
+//	{  /  }              prev / next editing pattern
+//	f                    next page (wraps 0..7)
+//	F                    prev page
+//	0..7 (not keys 1..8) — direct page select via SHIFT+number:
+//	                       '!','@','#','$','%','^','&','*' → pages 0..7
+//	i / I                next / prev accumulator sub-page (pages 6 only)
+//	G                    next gate length index on selected stage (page 5)
+//	B                    cycle AccumMode on selected stage (page 6)
+//	y / Y                gate-length -- on selected stage (inverse of G)
+//	c                    clear-pattern (opens confirm dialog)
+//	n                    confirm dialog: no / cancel
+//	Y (yes, uppercase)   confirm dialog: yes
+//	esc                  close confirm dialog
 //
 // Notes on divergences from the old UI:
-//   - 'g' toggles gate (was space; space is a global transport key in the new
-//     TUI, so we use 'g' instead).
-//   - '<' and '>' select scale (was 'q'); '<'/'>' are more discoverable as
-//     "previous/next" and the old '<>' pattern-switch now lives on '{/}'.
-//   - '-'/'+' set root note (was 'z'/'x').
+//   - 'g' toggles gate (was space; space is a global transport key in the
+//     new TUI).
+//   - '<' / '>' select scale (was 'q'); '{' / '}' switch patterns.
+//   - '-'/'+' can't be used for root note (globals); we use z/x (matches old).
+//   - page switching gets letter keys 'f'/'F' plus shift+number alternatives
+//     because 1..8 are the global track-focus hotkeys.
 func metropolixKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Metropolix == nil {
 		return
@@ -67,6 +99,12 @@ func metropolixKey(track *model.Track, project *model.Project, out midi.ToExtern
 	spec := track.Metropolix
 	pat := spec.Patterns[spec.EditingPatternIdx]
 	if pat == nil {
+		return
+	}
+
+	// Confirm dialog consumes keys exclusively while open.
+	if spec.ConfirmKind != devices.MetropolixConfirmNone {
+		metropolixConfirmKey(spec, pat, key)
 		return
 	}
 
@@ -124,6 +162,30 @@ func metropolixKey(track *model.Track, project *model.Project, out midi.ToExtern
 		if stage.Probability > 100 {
 			stage.Probability = 100
 		}
+	case "a":
+		if stage.Accumulator > -4 {
+			stage.Accumulator--
+		}
+	case "A":
+		if stage.Accumulator < 3 {
+			stage.Accumulator++
+		}
+	case "u":
+		if stage.PulseCount > 1 {
+			stage.PulseCount--
+		}
+	case "U":
+		if stage.PulseCount < 8 {
+			stage.PulseCount++
+		}
+	case "o":
+		if stage.Octave > 0 {
+			stage.Octave--
+		}
+	case "O":
+		if stage.Octave < 7 {
+			stage.Octave++
+		}
 	case "m":
 		pat.Mode = devices.PlaybackMode((int(pat.Mode) + 1) % 4)
 	case "[":
@@ -137,25 +199,105 @@ func metropolixKey(track *model.Track, project *model.Project, out midi.ToExtern
 		if pat.Length < 8 {
 			pat.Length++
 		}
-	case "<", ",":
+	case "<":
 		pat.Scale = (pat.Scale - 1 + devices.ScaleCount) % devices.ScaleCount
 	case ">", ".":
 		pat.Scale = (pat.Scale + 1) % devices.ScaleCount
-	case "-":
+	case "z":
 		if pat.RootNote > 0 {
 			pat.RootNote--
 		}
-	case "+", "=":
+	case "x":
 		if pat.RootNote < 127 {
 			pat.RootNote++
 		}
-	case "{", "n":
+	case "{":
 		if spec.EditingPatternIdx > 0 {
 			spec.EditingPatternIdx--
 		}
-	case "}", "N":
+	case "}":
 		if spec.EditingPatternIdx < devices.NumPatterns-1 {
 			spec.EditingPatternIdx++
+		}
+	case "f":
+		spec.Page = (spec.Page + 1) % 8
+	case "F":
+		spec.Page = (spec.Page + 7) % 8
+	case "!":
+		spec.Page = 0
+	case "@":
+		spec.Page = 1
+	case "#":
+		spec.Page = 2
+	case "$":
+		spec.Page = 3
+	case "%":
+		spec.Page = 4
+	case "^":
+		spec.Page = 5
+	case "&":
+		spec.Page = 6
+	case "*":
+		spec.Page = 7
+	case "i":
+		if spec.AccumSubPage < 2 {
+			spec.AccumSubPage++
+		}
+	case "I":
+		if spec.AccumSubPage > 0 {
+			spec.AccumSubPage--
+		}
+	case "G":
+		if stage.GateLength < 5 {
+			stage.GateLength++
+		}
+	case "y":
+		if stage.GateLength > 0 {
+			stage.GateLength--
+		}
+	case "B":
+		stage.AccumMode = (stage.AccumMode + 1) % 3
+	case "c":
+		spec.ConfirmKind = devices.MetropolixConfirmClearPattern
+		spec.ConfirmMsg = fmt.Sprintf("Clear pattern %d?", spec.EditingPatternIdx+1)
+	}
+}
+
+// metropolixConfirmKey handles keys while the confirm dialog is open.
+// 'Y' confirms, 'n'/'N'/'esc' cancels. (Note: 'y' lowercase is used by the
+// main-screen gate-length -- binding above, so the confirm uses uppercase Y.)
+func metropolixConfirmKey(spec *devices.Metropolix, pat *devices.MetropolixPattern, key string) {
+	switch key {
+	case "Y":
+		switch spec.ConfirmKind {
+		case devices.MetropolixConfirmClearPattern:
+			metropolixClearPattern(pat)
+		}
+		spec.ConfirmKind = devices.MetropolixConfirmNone
+		spec.ConfirmMsg = ""
+	case "n", "N", "esc":
+		spec.ConfirmKind = devices.MetropolixConfirmNone
+		spec.ConfirmMsg = ""
+	}
+}
+
+// metropolixClearPattern resets a MetropolixPattern to the default
+// (8 stages, gate on, pulse=1, ratchets=1, probability=100, notes walking
+// 0..7, octave 4, scale Major, root C4, mode Forward, length 8, slide time 3).
+func metropolixClearPattern(pat *devices.MetropolixPattern) {
+	pat.Length = 8
+	pat.Mode = devices.ModeForward
+	pat.Scale = devices.ScaleMajor
+	pat.RootNote = 60
+	pat.SlideTime = 3
+	for i := 0; i < 8; i++ {
+		pat.Stages[i] = devices.MetropolixStage{
+			Octave:      4,
+			Note:        i,
+			Gate:        true,
+			PulseCount:  1,
+			Ratchets:    1,
+			Probability: 100,
 		}
 	}
 }
@@ -164,13 +306,14 @@ func metropolixKey(track *model.Track, project *model.Project, out midi.ToExtern
 //
 // Layout:
 //
-//	header:  pattern X/Y (playing Z), mode, scale, root, length
-//	table:   one column per stage (1..Length), rows per parameter
-//	         (Pitch, Gate, Pulse, Ratch, Prob, Slide). Selected stage
-//	         marked with '>' above the column.
-//	footer:  key-help summary.
+//	header:  pattern, mode, scale, root, length, selected stage, page
+//	table:   one column per stage (1..Length), one row per parameter
+//	         (Pitch, Gate, Pulse, Ratch, Prob, Slide, Accum, AReset, AMode,
+//	         GateLen). Selected stage marked with '>' above the column.
+//	footer:  key-help summary, plus accumulator sub-page indicator on page 6.
 //
-// Plain text; no styling (theme layer is a later pass).
+// Plain text; no styling. If a confirm dialog is active, we replace the
+// normal view with a simple Y/n prompt.
 func metropolixRender(track *model.Track, project *model.Project) string {
 	if track == nil || track.Metropolix == nil {
 		return ""
@@ -188,23 +331,33 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 		spec.Selected = 0
 	}
 
+	if spec.ConfirmKind != devices.MetropolixConfirmNone {
+		return metropolixRenderConfirm(spec)
+	}
+
 	var b strings.Builder
 
 	playInfo := ""
 	if spec.EditingPatternIdx != spec.Schedule.Playing {
 		playInfo = fmt.Sprintf(" (playing %d)", spec.Schedule.Playing+1)
 	}
-	fmt.Fprintf(&b, "Metropolix  Pattern %d/%d%s  Mode %s  Scale %s  Root %s  Len %d  Stage %d\n\n",
+	fmt.Fprintf(&b, "Metropolix  Pattern %d/%d%s  Mode %s  Scale %s  Root %s  Len %d  Stage %d  Page %d:%s",
 		spec.EditingPatternIdx+1, devices.NumPatterns, playInfo,
 		metropolixModeName(pat.Mode),
 		metropolixScaleName(pat.Scale),
 		metropolixPitchName(int(pat.RootNote)),
 		pat.Length,
 		spec.Selected+1,
+		spec.Page,
+		metropolixPageName(spec.Page),
 	)
+	if spec.Page == 6 {
+		fmt.Fprintf(&b, "/%s", metropolixAccumSubPageName(spec.AccumSubPage))
+	}
+	b.WriteString("\n\n")
 
 	// Selection-pointer row: '>' above the selected stage column.
-	b.WriteString("         ")
+	b.WriteString("           ")
 	for i := 0; i < pat.Length; i++ {
 		if i == spec.Selected {
 			b.WriteString("  >  ")
@@ -215,24 +368,21 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 	b.WriteString("\n")
 
 	// Column header: stage numbers.
-	b.WriteString("Stage    ")
+	b.WriteString("Stage      ")
 	for i := 0; i < pat.Length; i++ {
 		fmt.Fprintf(&b, "  %d  ", i+1)
 	}
 	b.WriteString("\n")
 
-	// Pitch row (scale-degree name at current Octave/Note, without
-	// accumulator — the UI shows the static stage pitch, not the runtime
-	// accumulated pitch).
-	b.WriteString("Pitch    ")
+	// Pitch row — scale-degree / octave label.
+	b.WriteString("Pitch      ")
 	for i := 0; i < pat.Length; i++ {
-		stage := &pat.Stages[i]
-		fmt.Fprintf(&b, " %-4s", metropolixStagePitchLabel(pat, stage))
+		fmt.Fprintf(&b, " %-4s", metropolixStagePitchLabel(&pat.Stages[i]))
 	}
 	b.WriteString("\n")
 
 	// Gate row.
-	b.WriteString("Gate     ")
+	b.WriteString("Gate       ")
 	for i := 0; i < pat.Length; i++ {
 		ch := "."
 		if pat.Stages[i].Gate {
@@ -243,28 +393,28 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 	b.WriteString("\n")
 
 	// Pulse count.
-	b.WriteString("Pulse    ")
+	b.WriteString("Pulse      ")
 	for i := 0; i < pat.Length; i++ {
 		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].PulseCount)
 	}
 	b.WriteString("\n")
 
 	// Ratchets.
-	b.WriteString("Ratch    ")
+	b.WriteString("Ratch      ")
 	for i := 0; i < pat.Length; i++ {
 		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].Ratchets)
 	}
 	b.WriteString("\n")
 
-	// Probability (0..100 — show as 2-3 digit number).
-	b.WriteString("Prob     ")
+	// Probability (0..100).
+	b.WriteString("Prob       ")
 	for i := 0; i < pat.Length; i++ {
 		fmt.Fprintf(&b, " %3d ", pat.Stages[i].Probability)
 	}
 	b.WriteString("\n")
 
 	// Slide.
-	b.WriteString("Slide    ")
+	b.WriteString("Slide      ")
 	for i := 0; i < pat.Length; i++ {
 		ch := "."
 		if pat.Stages[i].Slide {
@@ -274,16 +424,59 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 	}
 	b.WriteString("\n")
 
+	// Accumulator (signed -4..+3).
+	b.WriteString("Accum      ")
+	for i := 0; i < pat.Length; i++ {
+		fmt.Fprintf(&b, " %+2d  ", pat.Stages[i].Accumulator)
+	}
+	b.WriteString("\n")
+
+	// AccumReset.
+	b.WriteString("AReset     ")
+	for i := 0; i < pat.Length; i++ {
+		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].AccumReset)
+	}
+	b.WriteString("\n")
+
+	// AccumMode (short name: Rst/P-P/Hld).
+	b.WriteString("AMode      ")
+	for i := 0; i < pat.Length; i++ {
+		fmt.Fprintf(&b, " %-4s", metropolixAccumModeShort(pat.Stages[i].AccumMode))
+	}
+	b.WriteString("\n")
+
+	// GateLength.
+	b.WriteString("GateLen    ")
+	for i := 0; i < pat.Length; i++ {
+		fmt.Fprintf(&b, " %-4s", metropolixGateLengthName(pat.Stages[i].GateLength))
+	}
+	b.WriteString("\n")
+
 	// Footer / key help.
 	b.WriteString("\n")
-	b.WriteString("  h/l select   j/k pitch   g gate   s slide   r/R ratchets   p/P prob\n")
-	b.WriteString("  [/] length   </> scale   -/+ root   m mode   {/} prev/next pattern\n")
+	b.WriteString("  h/l select   j/k pitch   g gate   s slide   r/R ratch   p/P prob   a/A accum\n")
+	b.WriteString("  u/U pulse    o/O octave  G/y gateLen  B accumMode   i/I accumSubPage\n")
+	b.WriteString("  [/] length   </> scale   z/x root    m mode   {/} prev/next pattern\n")
+	b.WriteString("  f/F page cycle   !@#$%^&* (shift+1..8) direct page   c clear pattern\n")
 
 	return b.String()
 }
 
-// metropolixModeName returns the display name for a PlaybackMode, or a
-// "?" sentinel if the value is out of range.
+// metropolixRenderConfirm renders the modal clear-pattern confirm dialog.
+// The view is intentionally simple so there's no ambiguity about which
+// prompt the user is answering.
+func metropolixRenderConfirm(spec *devices.Metropolix) string {
+	var b strings.Builder
+	b.WriteString("Metropolix — confirm\n\n")
+	b.WriteString("  ")
+	b.WriteString(spec.ConfirmMsg)
+	b.WriteString("\n\n")
+	b.WriteString("  [Y] Yes    [n] No    [esc] cancel\n")
+	return b.String()
+}
+
+// metropolixModeName returns the display name for a PlaybackMode, or "?" if
+// the value is out of range.
 func metropolixModeName(m devices.PlaybackMode) string {
 	if m < 0 || int(m) >= len(metropolixModeNames) {
 		return "?"
@@ -291,13 +484,54 @@ func metropolixModeName(m devices.PlaybackMode) string {
 	return metropolixModeNames[m]
 }
 
-// metropolixScaleName returns the display name for a ScaleType, or a
-// "?" sentinel if the value is out of range.
+// metropolixScaleName returns the display name for a ScaleType, or "?" if
+// the value is out of range.
 func metropolixScaleName(s devices.ScaleType) string {
 	if s < 0 || int(s) >= len(metropolixScaleNames) {
 		return "?"
 	}
 	return metropolixScaleNames[s]
+}
+
+// metropolixPageName returns the display name for a page index (0..7), or
+// "?" if out of range.
+func metropolixPageName(p int) string {
+	if p < 0 || p >= len(metropolixPageNames) {
+		return "?"
+	}
+	return metropolixPageNames[p]
+}
+
+// metropolixAccumSubPageName returns the display name for a sub-page
+// index (0..2), or "?" if out of range.
+func metropolixAccumSubPageName(sp int) string {
+	if sp < 0 || sp >= len(metropolixAccumSubPageNames) {
+		return "?"
+	}
+	return metropolixAccumSubPageNames[sp]
+}
+
+// metropolixAccumModeShort returns a short 3-letter name for an AccumMode
+// value (0..2), or "?" if out of range.
+func metropolixAccumModeShort(m int) string {
+	switch m {
+	case 0:
+		return "Rst"
+	case 1:
+		return "P-P"
+	case 2:
+		return "Hld"
+	}
+	return "?"
+}
+
+// metropolixGateLengthName returns the display name for a gate length index
+// (0..5), or "?" if out of range.
+func metropolixGateLengthName(gl int) string {
+	if gl < 0 || gl >= len(metropolixGateLengthNames) {
+		return "?"
+	}
+	return metropolixGateLengthNames[gl]
 }
 
 // metropolixPitchName returns a short MIDI-pitch label ("C4", "G#3", ...).
@@ -312,11 +546,11 @@ func metropolixPitchName(pitch int) string {
 	return fmt.Sprintf("%s%d", metropolixNoteNames[pitch%12], octave)
 }
 
-// metropolixStagePitchLabel returns a compact label for a stage's pitch —
-// "<scale-degree>/<octave>" e.g. "3/4". We deliberately DON'T resolve the
-// full MIDI pitch here (that would require the scale-intervals table which
-// lives in the controller package); this is the UI, so showing the raw
-// editable fields is clearer.
-func metropolixStagePitchLabel(pat *devices.MetropolixPattern, stage *devices.MetropolixStage) string {
+// metropolixStagePitchLabel returns a compact label for a stage's editable
+// pitch fields — "<scale-degree>/<octave>", e.g. "3/4". We deliberately
+// don't resolve the full MIDI pitch here (that requires the scale-intervals
+// table which lives in the controller package); the raw editable values
+// are clearer for the UI.
+func metropolixStagePitchLabel(stage *devices.MetropolixStage) string {
 	return fmt.Sprintf("%d/%d", stage.Note, stage.Octave)
 }

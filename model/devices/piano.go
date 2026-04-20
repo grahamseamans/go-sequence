@@ -21,6 +21,18 @@ type PianoPattern struct {
 	Machine [2]atomic.Pointer[CompiledPattern] `json:"-"`
 }
 
+// PianoPending is a recording-in-flight note: a NoteOn has been received
+// but the matching NoteOff hasn't come yet. Stored keyed by MIDI pitch so
+// the NoteOff handler can close out the exact note that started.
+//
+// Runtime only — never persisted. Closed on NoteOff (or NoteOn vel=0),
+// at which point a NoteEvent with known duration is appended to the
+// editing pattern.
+type PianoPending struct {
+	StartBeat float64
+	Velocity  uint8
+}
+
 // Piano is the persisted per-track piano roll device spec. Patterns is a
 // pointer array so PianoPattern values (with their non-copyable atomic
 // fields) stay at stable heap addresses.
@@ -36,6 +48,11 @@ type Piano struct {
 	EditVert          int                        `json:"editVert"`
 	SelectedNote      int                        `json:"selectedNote"`
 	Recording         bool                       `json:"-"`
+
+	// Pending tracks in-flight NoteOn/NoteOff pairs while Recording is true.
+	// Key is MIDI pitch; value is start-beat + attack velocity captured at
+	// NoteOn. Removed by NoteOff handler once the matching NoteOn closes.
+	Pending map[uint8]PianoPending `json:"-"`
 }
 
 // Validate clamps Piano fields into valid ranges.
@@ -46,6 +63,10 @@ func (p *Piano) Validate() {
 		p.EditingPatternIdx = 0
 	} else if p.EditingPatternIdx > NumPatterns-1 {
 		p.EditingPatternIdx = NumPatterns - 1
+	}
+
+	if p.Pending == nil {
+		p.Pending = make(map[uint8]PianoPending)
 	}
 
 	for i := range p.Patterns {

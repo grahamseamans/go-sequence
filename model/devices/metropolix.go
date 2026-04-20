@@ -70,9 +70,31 @@ type MetropolixPattern struct {
 	Machine   [2]atomic.Pointer[CompiledPattern] `json:"-"`
 }
 
+// Metropolix ConfirmKind values. Zero means "no dialog active"; non-zero
+// selects which destructive action the y-key should run. Dialog state is
+// transient (json:"-") and only used by the TUI.
+const (
+	MetropolixConfirmNone         = 0
+	MetropolixConfirmClearPattern = 1
+)
+
 // Metropolix is the persisted per-track Metropolix device spec. Patterns is
 // a pointer array so MetropolixPattern values (with their non-copyable
 // atomic fields) stay at stable heap addresses.
+//
+// Page selects which launchpad view is active:
+//
+//	0 = main stage editor (rows = note, cols = stage)
+//	1 = octave per stage
+//	2 = pulse count per stage
+//	3 = ratchets per stage
+//	4 = probability per stage
+//	5 = gate length per stage (plus gate + slide toggles)
+//	6 = accumulator (sub-pages via AccumSubPage: 0=value, 1=reset, 2=mode)
+//	7 = settings (mode, scale, length, root, slide time)
+//
+// ConfirmKind / ConfirmMsg implement a tiny modal dialog used to guard
+// destructive actions (clear-pattern) in the TUI.
 type Metropolix struct {
 	Patterns          [NumPatterns]*MetropolixPattern `json:"patterns"`
 	Schedule          Schedule                        `json:"schedule"`
@@ -80,6 +102,8 @@ type Metropolix struct {
 	Page              int                             `json:"page"`
 	Selected          int                             `json:"selected"`
 	AccumSubPage      int                             `json:"accumSubPage"`
+	ConfirmKind       int                             `json:"-"`
+	ConfirmMsg        string                          `json:"-"`
 }
 
 // Validate clamps Metropolix fields into valid ranges.

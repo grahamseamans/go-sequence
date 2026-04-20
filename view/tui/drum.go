@@ -12,31 +12,37 @@ import (
 // drumKey handles a keyboard event on the drum view.
 //
 // Caller (HandleKey in tui.go) holds track.Lock and calls MarkTrackDirty
-// after this returns. We just mutate the spec.
+// after this returns. We just mutate spec.
 //
-// Keybindings preserved from the old sequencer/drum.go:
+// Keybindings (ported from old sequencer/drum.go HandleKey, adapted to the
+// new model — see the comment at the top of each case):
 //
-//	h / left              move edit cursor left (within 32 steps)
-//	l / right             move edit cursor right
+// When a confirm dialog is open (state.ConfirmKind != ConfirmNone):
+//
+//	y / Y                 confirm (run the pending destructive action)
+//	n / N / esc / q /     dismiss (any other key dismisses too; matches old
+//	    any other key     "any other key cancels" UX hint)
+//
+// Otherwise:
+//
+//	h / left              move cursor left through steps
+//	l / right             move cursor right
 //	j / down              select next drum lane (0..15)
 //	k / up                select previous drum lane
-//	space                 toggle the step under the cursor
-//	c                     clear the selected lane (no confirm)
-//	C                     clear the whole editing pattern (no confirm)
+//	space / x             toggle the step under the cursor
+//	[ / ]                 decrease / increase pattern length, in 16th-note
+//	                      steps (new model only has a pattern-global length)
+//	c                     clear the selected lane -> confirm dialog
+//	C                     clear the whole editing pattern -> confirm dialog
 //	< or ,                previous pattern
 //	> or .                next pattern
 //	r / R                 toggle record-arm
+//	p / P                 toggle preview-arm
 //
 // Dropped from the old UI:
 //
-//	[ / ]                 per-lane length — new model has pattern-global
-//	                      length only, not per-lane. Dropped.
-//	y / n / esc           confirm-dialog — no dialog in new UI (actions
-//	                      are immediate).
-//
-// Added:
-//
-//	x                     alias for space (toggle step at cursor).
+//	per-lane length       the new model has pattern-global length only.
+//	                      [ / ] now resize the pattern, not a lane.
 func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Drum == nil {
 		return
@@ -44,6 +50,30 @@ func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, ke
 	state := track.Drum
 	pat := state.Patterns[state.EditingPatternIdx]
 	if pat == nil {
+		return
+	}
+
+	// Confirm-dialog state takes over the entire keymap. y confirms, any
+	// other key dismisses. Matches the old HandleKey's confirmMode branch.
+	if state.ConfirmKind != devices.ConfirmNone {
+		switch key {
+		case "y", "Y":
+			switch state.ConfirmKind {
+			case devices.ConfirmClearNote:
+				for i := range pat.Notes[state.SelectedNoteIdx].Steps {
+					pat.Notes[state.SelectedNoteIdx].Steps[i] = devices.DrumStep{}
+				}
+			case devices.ConfirmClearPattern:
+				for l := range pat.Notes {
+					for s := range pat.Notes[l].Steps {
+						pat.Notes[l].Steps[s] = devices.DrumStep{}
+					}
+				}
+			}
+		}
+		// Any key dismisses (y having already executed above).
+		state.ConfirmKind = devices.ConfirmNone
+		state.ConfirmMsg = ""
 		return
 	}
 
@@ -70,15 +100,30 @@ func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, ke
 		if s.Active && s.Velocity == 0 {
 			s.Velocity = 100
 		}
+	case "[":
+		// Shrink pattern by one 16th-note step. Minimum is 1 step so the
+		// compiled pattern always has a non-zero Length.
+		stepTicks := devices.PPQ / 4
+		if pat.Length > stepTicks {
+			pat.Length -= stepTicks
+		}
+	case "]":
+		// Grow pattern by one 16th-note step, capped at 32 steps to match
+		// the NoteLane.Steps array bound.
+		stepTicks := devices.PPQ / 4
+		if pat.Length < 32*stepTicks {
+			pat.Length += stepTicks
+		}
 	case "c":
-		for i := range pat.Notes[state.SelectedNoteIdx].Steps {
-			pat.Notes[state.SelectedNoteIdx].Steps[i] = devices.DrumStep{}
+		// Open confirm dialog only if there's content to clear.
+		if drumLaneHasAnyStep(&pat.Notes[state.SelectedNoteIdx]) {
+			state.ConfirmKind = devices.ConfirmClearNote
+			state.ConfirmMsg = fmt.Sprintf("Clear lane %d?", state.SelectedNoteIdx+1)
 		}
 	case "C":
-		for l := range pat.Notes {
-			for s := range pat.Notes[l].Steps {
-				pat.Notes[l].Steps[s] = devices.DrumStep{}
-			}
+		if drumPatternHasAnyStep(pat) {
+			state.ConfirmKind = devices.ConfirmClearPattern
+			state.ConfirmMsg = fmt.Sprintf("Clear pattern %d?", state.EditingPatternIdx+1)
 		}
 	case "<", ",":
 		if state.EditingPatternIdx > 0 {
@@ -90,22 +135,26 @@ func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, ke
 		}
 	case "r", "R":
 		state.Recording = !state.Recording
+	case "p", "P":
+		state.Preview = !state.Preview
 	}
 }
 
 // drumRender returns the TUI view for the drum device.
 //
-// Layout:
+// Layout (ported from old sequencer/drum.go View()):
 //
-//	header: pattern, cursor, kit, length, REC flag
-//	grid:   16 lanes (rows) x 32 steps (cols)
-//	        column headers mark the current playhead (if any)
-//	        active steps: active, inactive steps: dot
-//	        cursor cell is highlighted
-//	footer: key-help summary
-//
-// Plain-text only — no colour/styling in this first pass. Styling via a
-// theme package is a follow-up.
+//	header: "DRUM Pattern N[ (playing:M)] Step S/L Note X [REC] [PRE]"
+//	        — playing-pattern info shown only when editing != playing.
+//	        — REC / PRE flags shown when recording / preview armed.
+//	confirm: when ConfirmKind != ConfirmNone, a dialog block replaces the
+//	         main grid; y confirms, any other key dismisses.
+//	grid:   16 lanes (rows) x up to 32 steps (cols), single char per cell.
+//	        — beyond the pattern length: blank '-' (or '□' under the cursor).
+//	        — on the playhead step (active lane, playing pattern): '▶' / '▷'.
+//	        — active step: '●' / '◉' (cursor).
+//	        — empty step: '·' / '○' (cursor).
+//	footer: key-help summary.
 func drumRender(track *model.Track, project *model.Project) string {
 	if track == nil || track.Drum == nil {
 		return ""
@@ -126,55 +175,67 @@ func drumRender(track *model.Track, project *model.Project) string {
 
 	playingStep := drumPlayingStep(track, project)
 
-	kit := devices.GetKit(track.Kit)
-
 	var b strings.Builder
 	// Header
-	rec := ""
-	if state.Recording {
-		rec = " REC"
-	}
 	playInfo := ""
 	if state.EditingPatternIdx != state.Schedule.Playing {
-		playInfo = fmt.Sprintf(" (playing %d)", state.Schedule.Playing+1)
+		playInfo = fmt.Sprintf(" (playing:%d)", state.Schedule.Playing+1)
 	}
-	fmt.Fprintf(&b, "Drum  Pattern %d/%d%s  Lane %d  Cursor %d/%d  Kit %s  Len %d%s\n\n",
-		state.EditingPatternIdx+1, devices.NumPatterns, playInfo,
-		state.SelectedNoteIdx+1, state.Cursor+1, stepsPerPattern,
-		kit.Name, stepsPerPattern, rec)
-
-	// Playhead column indicator — a down-arrow above the playing step.
-	b.WriteString("    ")
-	for step := 0; step < stepsPerPattern; step++ {
-		if step == playingStep {
-			b.WriteString("v")
-		} else {
-			b.WriteString(" ")
-		}
+	flags := ""
+	if state.Recording {
+		flags += " REC"
 	}
-	b.WriteString("\n")
+	if state.Preview {
+		flags += " PRE"
+	}
+	fmt.Fprintf(&b, "DRUM  Pattern %d%s  Step %d/%d  Note %d%s\n\n",
+		state.EditingPatternIdx+1, playInfo, state.Cursor+1, stepsPerPattern,
+		state.SelectedNoteIdx+1, flags)
 
-	// Grid: 16 lanes, each with stepsPerPattern cells.
+	// Confirm dialog takes over the body. Mirrors the old View() block.
+	if state.ConfirmKind != devices.ConfirmNone {
+		b.WriteString("─────────────────────────────────────────────────\n\n")
+		fmt.Fprintf(&b, "  %s\n\n", state.ConfirmMsg)
+		b.WriteString("  [y] Yes    [n] No\n\n")
+		b.WriteString("─────────────────────────────────────────────────\n")
+		return b.String()
+	}
+
+	// Grid: 16 lanes, 32 columns (always full width — the old UI drew the
+	// full 32-col grid and marked "beyond length" cells specially).
 	for lane := 0; lane < 16; lane++ {
 		selMark := " "
 		if lane == state.SelectedNoteIdx {
 			selMark = ">"
 		}
 		fmt.Fprintf(&b, "%s%2d ", selMark, lane+1)
-		for step := 0; step < stepsPerPattern; step++ {
+		for step := 0; step < 32; step++ {
 			isCursor := lane == state.SelectedNoteIdx && step == state.Cursor
+			// Only the selected lane shows the playhead — the playhead lives
+			// on the currently-editing pattern (see drumPlayingStep, which
+			// returns -1 when editing != playing).
+			isPlayhead := lane == state.SelectedNoteIdx && step == playingStep
+			beyondLen := step >= stepsPerPattern
 			active := pat.Notes[lane].Steps[step].Active
 
 			var ch string
 			switch {
-			case isCursor && active:
-				ch = "#"
-			case isCursor:
-				ch = "_"
+			case beyondLen && isCursor:
+				ch = "□"
+			case beyondLen:
+				ch = "-"
+			case isPlayhead && isCursor:
+				ch = "▷"
+			case isPlayhead:
+				ch = "▶"
+			case active && isCursor:
+				ch = "◉"
 			case active:
-				ch = "X"
+				ch = "●"
+			case isCursor:
+				ch = "○"
 			default:
-				ch = "."
+				ch = "·"
 			}
 			b.WriteString(ch)
 		}
@@ -183,10 +244,31 @@ func drumRender(track *model.Track, project *model.Project) string {
 
 	// Footer / key-help
 	b.WriteString("\n")
-	b.WriteString("  h/l move cursor   j/k select lane   space toggle   r record\n")
-	b.WriteString("  c clear lane      C clear pattern   < > prev/next pattern\n")
+	b.WriteString("  h/l move cursor   j/k select lane   space/x toggle step\n")
+	b.WriteString("  [ / ]  shorten/lengthen pattern     < >  prev/next pattern\n")
+	b.WriteString("  c clear lane   C clear pattern   r record   p preview\n")
 
 	return b.String()
+}
+
+// drumLaneHasAnyStep returns true if any step in the lane is active.
+func drumLaneHasAnyStep(lane *devices.NoteLane) bool {
+	for i := range lane.Steps {
+		if lane.Steps[i].Active {
+			return true
+		}
+	}
+	return false
+}
+
+// drumPatternHasAnyStep returns true if any step in any lane is active.
+func drumPatternHasAnyStep(pat *devices.DrumPattern) bool {
+	for i := range pat.Notes {
+		if drumLaneHasAnyStep(&pat.Notes[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // drumPlayingStep returns the currently-playing step index (0..31) for this
@@ -205,7 +287,7 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 		return -1
 	}
 	if track.Drum.EditingPatternIdx != playingIdx {
-		// Playhead only makes sense on the lane the user is editing; the
+		// Playhead only makes sense on the pattern the user is editing; the
 		// edit and playing patterns differ, so don't draw a playhead.
 		return -1
 	}

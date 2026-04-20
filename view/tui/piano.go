@@ -5,9 +5,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
+	"go-sequence/widgets"
 )
 
 // piano view constants.
@@ -17,6 +20,21 @@ const (
 )
 
 var pianoNoteNames = []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+
+// Piano TUI styling. Flat palette — no runtime theme wiring yet; the
+// per-role colors here match the old sequencer's launchpad LED colors so
+// the TUI and launchpad reads as the same instrument. If/when we wire
+// theme.Theme in, these move into theme.Palette roles.
+var (
+	pianoStyleHeader   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#d4d4ff"))
+	pianoStyleRec      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff3030"))
+	pianoStylePitchLbl = lipgloss.NewStyle().Foreground(lipgloss.Color("#8a8aaa"))
+	pianoStyleEmpty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#3a3a48"))
+	pianoStyleNote     = lipgloss.NewStyle().Foreground(lipgloss.Color("#50c8ff"))
+	pianoStyleSelected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff64c8"))
+	pianoStylePlayhead = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
+	pianoStyleOOB      = lipgloss.NewStyle().Foreground(lipgloss.Color("#24242c"))
+)
 
 // pianoKey handles a keyboard event on the piano view.
 //
@@ -257,19 +275,20 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 	}
 }
 
-// pianoRender returns the TUI view for the piano device. Plain text only.
+// pianoRender returns the TUI view for the piano device.
 //
-// Layout:
+// Layout (styled with lipgloss):
 //
-//	header: pattern, pitch/beat center, view scale, horiz/vert edit, REC
-//	grid:   state.ViewRows pitches x N cols. rows render top (highest pitch)
-//	        to bottom (lowest). cols render startBeat..endBeat in beats
-//	        at viewScale beats-per-col.
-//	        active note starts: '(' (selected: '@')
-//	        active note body:   '-' (playhead col: '>')
-//	        empty cells:        '.' (playhead col: '|')
-//	        out-of-pattern:     ' '
-//	footer: keybinding summary.
+//	header:   pattern, pitch/beat center, view scale, horiz/vert edit, REC
+//	grid:     state.ViewRows pitches x N cols. rows render top (highest pitch)
+//	          to bottom (lowest). cols render startBeat..endBeat in beats
+//	          at viewScale beats-per-col.
+//	          note start:     ● (selected: ◉, playhead-overlap: ▶)
+//	          note body:      ─ (overlap: ═)
+//	          empty cell:     · (playhead: ▶)
+//	          out-of-pattern: -
+//	selected: single line with pitch / start / duration / velocity.
+//	help:     widgets.RenderKeyHelp sections for all keybindings.
 func pianoRender(track *model.Track, project *model.Project) string {
 	if track == nil || track.Piano == nil {
 		return ""
@@ -284,8 +303,6 @@ func pianoRender(track *model.Track, project *model.Project) string {
 	editH := pianoEditHoriz(state.EditHoriz)
 	editV := pianoEditVert(state.EditVert)
 
-	// How many cols of grid to draw. Use ViewRows (smushed/spread) as the
-	// pitch-row count.
 	rows := state.ViewRows
 	if rows <= 0 {
 		rows = pianoViewSpread
@@ -298,8 +315,8 @@ func pianoRender(track *model.Track, project *model.Project) string {
 		cols = pianoMaxCols
 	}
 
-	// Viewport: center the horizontal range on CenterBeat. The top row is
-	// the highest displayed pitch; row (rows/2) holds CenterPitch.
+	// Viewport: center horizontal range on CenterBeat. Top row is the
+	// highest displayed pitch; row (rows/2) holds CenterPitch.
 	beatsPerCol := viewScale
 	totalBeats := float64(cols) * beatsPerCol
 	startBeat := state.CenterBeat - totalBeats/2
@@ -311,24 +328,32 @@ func pianoRender(track *model.Track, project *model.Project) string {
 		playheadCol = int((playheadBeat - startBeat) / beatsPerCol)
 	}
 
+	vertMode := "spread"
+	if state.ViewRows == pianoViewSmushed {
+		vertMode = "smushed"
+	}
+
 	var b strings.Builder
 
-	// Header.
-	rec := ""
-	if state.Recording {
-		rec = " REC"
-	}
+	// Header — pattern, position, view, edit, rec.
 	playInfo := ""
 	if state.EditingPatternIdx != state.Schedule.Playing {
 		playInfo = fmt.Sprintf(" (playing %d)", state.Schedule.Playing+1)
 	}
-	fmt.Fprintf(&b, "Piano  Pattern %d/%d%s  Len %.2g  Center %s%d @ %.2f  View %s/col  Edit %s h, %d v%s\n\n",
+	header := fmt.Sprintf("PIANO  Pattern %d/%d%s  Len %.2g  Center %s%d @ %.2f",
 		state.EditingPatternIdx+1, devices.NumPatterns, playInfo,
 		pat.Length,
 		pianoNoteNames[int(state.CenterPitch)%12], int(state.CenterPitch)/12,
-		state.CenterBeat,
-		pianoFmtStep(viewScale), pianoFmtStep(editH), editV,
-		rec)
+		state.CenterBeat)
+	b.WriteString(pianoStyleHeader.Render(header))
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "View: %s/col %s  Edit: %s horiz, %d semi vert",
+		pianoFmtStep(viewScale), vertMode, pianoFmtStep(editH), editV)
+	if state.Recording {
+		b.WriteString("  ")
+		b.WriteString(pianoStyleRec.Render("● REC"))
+	}
+	b.WriteString("\n\n")
 
 	// Grid.
 	for row := 0; row < rows; row++ {
@@ -341,20 +366,23 @@ func pianoRender(track *model.Track, project *model.Project) string {
 			b.WriteString("\n")
 			continue
 		}
-		fmt.Fprintf(&b, "%2s%-2d ", pianoNoteNames[pitch%12], pitch/12)
+		label := fmt.Sprintf("%2s%-2d ", pianoNoteNames[pitch%12], pitch/12)
+		b.WriteString(pianoStylePitchLbl.Render(label))
 		for col := 0; col < cols; col++ {
 			colBeat := startBeat + float64(col)*beatsPerCol
 			colBeatEnd := colBeat + beatsPerCol
 			isPlayhead := col == playheadCol
 
 			if colBeat < 0 || colBeat >= pat.Length {
-				b.WriteString(" ")
+				b.WriteString(pianoStyleOOB.Render("-"))
 				continue
 			}
 
-			var ch string
-			var startIdx = -1
-			hit := false
+			// Find notes crossing this cell. Track whether any note STARTS
+			// here (to draw a start-cap) and whether ≥2 notes overlap here
+			// (for the heavier body rune).
+			startIdx := -1
+			hitCount := 0
 			for i := range pat.Notes {
 				n := &pat.Notes[i]
 				if int(n.Pitch) != pitch {
@@ -362,28 +390,34 @@ func pianoRender(track *model.Track, project *model.Project) string {
 				}
 				noteEnd := n.Start + n.Duration
 				if n.Start < colBeatEnd && noteEnd > colBeat {
-					hit = true
-					if n.Start >= colBeat && n.Start < colBeatEnd {
+					hitCount++
+					if n.Start >= colBeat && n.Start < colBeatEnd && startIdx < 0 {
 						startIdx = i
 					}
-					break
 				}
 			}
+
+			var ch string
+			var style lipgloss.Style
 			switch {
 			case startIdx == state.SelectedNote && startIdx >= 0:
-				ch = "@"
+				ch, style = "◉", pianoStyleSelected
+			case startIdx >= 0 && isPlayhead:
+				ch, style = "▶", pianoStylePlayhead
 			case startIdx >= 0:
-				ch = "("
-			case hit && isPlayhead:
-				ch = ">"
-			case hit:
-				ch = "-"
+				ch, style = "●", pianoStyleNote
+			case hitCount > 1:
+				ch, style = "═", pianoStyleNote
+			case hitCount == 1 && isPlayhead:
+				ch, style = "▶", pianoStylePlayhead
+			case hitCount == 1:
+				ch, style = "─", pianoStyleNote
 			case isPlayhead:
-				ch = "|"
+				ch, style = "▶", pianoStylePlayhead
 			default:
-				ch = "."
+				ch, style = "·", pianoStyleEmpty
 			}
-			b.WriteString(ch)
+			b.WriteString(style.Render(ch))
 		}
 		b.WriteString("\n")
 	}
@@ -396,11 +430,36 @@ func pianoRender(track *model.Track, project *model.Project) string {
 			n.Start, n.Duration, n.Velocity)
 	}
 
-	// Footer.
+	// Key help — structured via widgets (matches old sequencer/pianoroll.go).
 	b.WriteString("\n")
-	b.WriteString("  hjkl select   yuio move   n/m shorter/longer   space add   x delete\n")
-	b.WriteString("  q/w zoom   a/s rows   d/f horiz step   e/r vert step\n")
-	b.WriteString("  [/] length   c clear   < > pattern   R record\n")
+	b.WriteString(widgets.RenderKeyHelp([]widgets.KeySection{
+		{Title: "Select", Keys: []widgets.KeyBinding{
+			{Key: "hjkl", Desc: "select notes"},
+		}},
+		{Title: "Move", Keys: []widgets.KeyBinding{
+			{Key: "yuio", Desc: "move note"},
+			{Key: "n / m", Desc: "shorter / longer"},
+		}},
+		{Title: "Notes", Keys: []widgets.KeyBinding{
+			{Key: "space", Desc: "add note"},
+			{Key: "x", Desc: "delete note"},
+		}},
+		{Title: "View", Keys: []widgets.KeyBinding{
+			{Key: "q / w", Desc: "zoom out/in"},
+			{Key: "a / s", Desc: "smushed/spread"},
+		}},
+		{Title: "Grid", Keys: []widgets.KeyBinding{
+			{Key: "d / f", Desc: "horiz coarse/fine"},
+			{Key: "e / r", Desc: "vert coarse/fine"},
+		}},
+		{Title: "Pattern", Keys: []widgets.KeyBinding{
+			{Key: "< / >", Desc: "prev/next pattern"},
+			{Key: "[ / ]", Desc: "length -/+"},
+			{Key: "c", Desc: "clear"},
+			{Key: "R", Desc: "record toggle"},
+		}},
+	}))
+	b.WriteString("\n")
 
 	return b.String()
 }
