@@ -13,7 +13,7 @@
 // skips leftover *.tmp.json files.
 //
 // LoadProject does NOT stop playback or trigger a recompile. Per DESIGN §4.5
-// that is the view layer's job: after calling SaveOps.Load, the project-
+// that is the view layer's job: after calling SaveOps.LoadByName, the project-
 // browser view pauses playback and calls controller.MarkPlayingDirty for
 // each track so the compile goroutine re-renders against the fresh specs.
 //
@@ -222,9 +222,27 @@ func NewControllerSaveOps() save.SaveOps {
 }
 
 func (controllerSaveOps) Save(p *model.Project, name string) error { return SaveProject(p, name) }
-func (controllerSaveOps) Load(path string) (*model.Project, error) { return LoadProject(path) }
-func (controllerSaveOps) ListSaves() ([]string, error)             { return ListSaves() }
-func (controllerSaveOps) DeleteSave(name string) error             { return DeleteSave(name) }
+
+// LoadByName resolves the bare save name to its on-disk path
+// (~/.go-sequence/saves/<name>.json) and delegates to LoadProject. Rejects
+// empty names and path separators so a caller can't escape the saves dir.
+func (controllerSaveOps) LoadByName(name string) (*model.Project, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("LoadByName: empty name")
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return nil, errors.New("LoadByName: name must not contain path separators")
+	}
+	dir, err := savesDir()
+	if err != nil {
+		return nil, err
+	}
+	return LoadProject(filepath.Join(dir, name+".json"))
+}
+
+func (controllerSaveOps) ListSaves() ([]string, error) { return ListSaves() }
+func (controllerSaveOps) DeleteSave(name string) error { return DeleteSave(name) }
 func (controllerSaveOps) RenameSave(oldName, newName string) error {
 	return RenameSave(oldName, newName)
 }

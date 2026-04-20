@@ -26,7 +26,11 @@ import (
 // channel so the view can display failures.
 type SaveOps interface {
 	Save(project *model.Project, name string) error
-	Load(path string) (*model.Project, error)
+	// LoadByName reads the save with the given bare name (no extension, no
+	// path) and returns a validated *model.Project. The implementation owns
+	// the saves-directory path join so views stay ignorant of on-disk
+	// layout.
+	LoadByName(name string) (*model.Project, error)
 	ListSaves() ([]string, error)
 	DeleteSave(name string) error
 	RenameSave(oldName, newName string) error

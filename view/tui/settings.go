@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -8,13 +11,21 @@ import (
 
 // settingsKey handles keyboard input on the settings view.
 //
-// Ported from controller/devices/settings.HandleKey.
+// Edits apply to Tracks[focusedTrack]. Caller (HandleKey in tui.go) holds
+// track.Lock and calls MarkTrackDirty afterwards.
 //
-//	t / T        cycle device type (Drum → Piano → Metropolix → None → ...)
+// Keybindings:
+//
+//	t / T        cycle device type forward / backward
+//	             (None → Drum → Piano → Metropolix → None)
 //	[ / ]        decrement / increment MIDI channel (0..15)
-//	k            cycle drum kit (only when track.Type == DeviceDrum)
+//	k            cycle drum kit (only when Type == DeviceDrum)
 //	m            toggle mute
-//	s            toggle solo
+//	o            toggle solo  (NOT 's' — that's reserved for the global
+//	                           project-browser save command)
+//
+// Port-name selection isn't ported: it requires a picker UI that isn't
+// trivial text (see TODO in SHORTCUTS.md).
 func settingsKey(project *model.Project, out midi.ToExternal, focusedTrack int, key string) {
 	if project == nil {
 		return
@@ -46,18 +57,84 @@ func settingsKey(project *model.Project, out midi.ToExternal, focusedTrack int, 
 		}
 	case "m":
 		track.Muted = !track.Muted
-	case "s":
+	case "o":
 		track.Solo = !track.Solo
 	}
 }
 
-// settingsRender returns the TUI view for the settings device. Stub.
-func settingsRender(project *model.Project) string { return "" }
+// settingsRender returns the TUI view for the settings page.
+//
+// Layout: one line per track. The currently-focused track (from
+// project.UI.LastFocusedTrack) is marked with '>'. Each line shows index,
+// mute/solo state, name, device type, port (or "-" when unset), MIDI
+// channel (1..16 to the user, 0..15 internally), and for drum tracks, the
+// kit name.
+func settingsRender(project *model.Project) string {
+	if project == nil {
+		return ""
+	}
 
-// --- helpers (package-private; caller holds track.mu) ---
+	var b strings.Builder
+	b.WriteString("Settings\n\n")
+
+	focused := project.UI.LastFocusedTrack
+	for i := 0; i < 8; i++ {
+		track := project.Tracks[i]
+		mark := "  "
+		if i == focused {
+			mark = "> "
+		}
+		if track == nil {
+			fmt.Fprintf(&b, "%s%d  -\n", mark, i+1)
+			continue
+		}
+		flags := settingsFlagsLabel(track)
+		port := track.PortName
+		if port == "" {
+			port = "-"
+		}
+		kit := ""
+		if track.Type == model.DeviceDrum {
+			kit = fmt.Sprintf("  Kit=%s", settingsKitLabel(track.Kit))
+		}
+		fmt.Fprintf(&b, "%s%d  %s  Name=%-10s  Type=%-10s  Port=%s  Ch=%d%s\n",
+			mark, i+1, flags, track.Name, sessionDeviceLabel(track.Type), port, track.Channel+1, kit)
+	}
+
+	b.WriteString("\n")
+	b.WriteString("  t/T cycle type   k cycle kit   [ ] channel -/+\n")
+	b.WriteString("  m mute           o solo        1-8 focus track\n")
+	return b.String()
+}
+
+// settingsFlagsLabel renders mute/solo state as a short 5-char indicator,
+// e.g. "[MS]", "[M-]", "[-S]", "[--]".
+func settingsFlagsLabel(track *model.Track) string {
+	m := "-"
+	if track.Muted {
+		m = "M"
+	}
+	s := "-"
+	if track.Solo {
+		s = "S"
+	}
+	return fmt.Sprintf("[%s%s]", m, s)
+}
+
+// settingsKitLabel returns the user-visible kit name for a track's Kit
+// string, falling back to the raw string if the kit is unknown.
+func settingsKitLabel(kit string) string {
+	if kit == "" {
+		return "-"
+	}
+	return kit
+}
+
+// --- mutation helpers (package-private; caller holds track.mu) ---
 
 // settingsSetDeviceType changes a track's device Type and reshapes its device
-// pointers to match.
+// pointers so exactly one is non-nil (matching the new Type). Validate() is
+// called on the new device so patterns get default lengths.
 func settingsSetDeviceType(track *model.Track, kind model.DeviceKind) {
 	track.Type = kind
 	switch kind {

@@ -1,57 +1,83 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
 )
 
-// Piano view tables (ported from controller/devices/piano).
-
-// pianoViewScales is beats-per-column for each zoom level.
-var pianoViewScales = []float64{
-	0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0,
-}
-
-// pianoEditHorizSteps is the beat delta for each horizontal-edit sensitivity.
-var pianoEditHorizSteps = []float64{
-	0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0,
-}
-
-// pianoEditVertSteps is the semitone delta for each vertical-edit sensitivity.
-var pianoEditVertSteps = []int{1, 12}
-
+// piano view constants.
 const (
-	pianoViewSmushed = 12
-	pianoViewSpread  = 24
+	pianoMaxCols            = 64 // hard cap on grid columns drawn
+	pianoMinNoteDurationBts = 0.25
 )
 
-// pianoMinNoteDurationBeats is the smallest duration a note may have.
-const pianoMinNoteDurationBeats = 0.25
+var pianoNoteNames = []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 
 // pianoKey handles a keyboard event on the piano view.
 //
-// Ported from controller/devices/piano.HandleKey. Caller holds track.mu.
+// Caller (HandleKey in tui.go) holds track.Lock and calls MarkTrackDirty
+// after this returns — so we only mutate spec here.
+//
+// Keybindings preserved from sequencer/pianoroll.go:
+//
+//	h / left, l / right   select previous / next note by time
+//	j / down, k / up      select next / previous note by pitch
+//	y / o                 move selected note earlier / later by one
+//	                      horiz-edit step
+//	u / i                 move selected note down / up by one vert-edit step
+//	n / m                 shorten / lengthen selected note by one horiz step
+//	space                 add a note at (CenterBeat, CenterPitch),
+//	                      4x horiz step wide, velocity 100
+//	x                     delete selected note
+//	[ / ]                 pattern length - / + one beat (clamped 1..64)
+//	c                     clear editing pattern
+//	< / >                 previous / next pattern (. aliases >)
+//	q / w                 zoom out / in
+//	a / s                 rows mode: smushed / spread
+//	d / f                 horiz edit step: coarser / finer
+//	e / r                 vert edit step: coarser / finer
+//	R                     toggle recording (capital R; lowercase r is vert-edit)
 func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
 	if track == nil || track.Piano == nil {
 		return
 	}
 	state := track.Piano
 	pat := state.Patterns[state.EditingPatternIdx]
+	if pat == nil {
+		return
+	}
+
 	editH := pianoEditHoriz(state.EditHoriz)
 	editV := pianoEditVert(state.EditVert)
 
 	switch key {
 	case "h", "left":
-		pianoSelectByTime(state, -1)
+		// Select previous note by time (wraps).
+		if len(pat.Notes) > 0 {
+			state.SelectedNote--
+			if state.SelectedNote < 0 {
+				state.SelectedNote = len(pat.Notes) - 1
+			}
+			pianoCenterOnSelectionInline(state, pat)
+		}
 	case "l", "right":
-		pianoSelectByTime(state, 1)
+		if len(pat.Notes) > 0 {
+			state.SelectedNote++
+			if state.SelectedNote >= len(pat.Notes) {
+				state.SelectedNote = 0
+			}
+			pianoCenterOnSelectionInline(state, pat)
+		}
+
 	case "j", "down":
-		pianoSelectByPitch(state, -1)
+		pianoSelectByPitchInline(state, pat, -1)
 	case "k", "up":
-		pianoSelectByPitch(state, 1)
+		pianoSelectByPitchInline(state, pat, 1)
 
 	case "y":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
@@ -60,8 +86,8 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 			if n.Start+delta < 0 {
 				delta = -n.Start
 			}
-			pianoMoveNoteTime(pat, state.SelectedNote, delta)
-			pianoCenterOnSelection(state)
+			n.Start += delta
+			pianoCenterOnSelectionInline(state, pat)
 		}
 	case "o":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
@@ -70,33 +96,54 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 			if n.Start+n.Duration+delta > pat.Length {
 				delta = pat.Length - n.Start - n.Duration
 			}
-			pianoMoveNoteTime(pat, state.SelectedNote, delta)
-			pianoCenterOnSelection(state)
+			if delta < 0 {
+				delta = 0
+			}
+			n.Start += delta
+			pianoCenterOnSelectionInline(state, pat)
 		}
+
 	case "u":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
-			pianoMoveNotePitch(pat, state.SelectedNote, -editV)
-			pianoCenterOnSelection(state)
+			n := &pat.Notes[state.SelectedNote]
+			target := int(n.Pitch) - editV
+			if target < 0 {
+				target = 0
+			}
+			n.Pitch = uint8(target)
+			pianoCenterOnSelectionInline(state, pat)
 		}
 	case "i":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
-			pianoMoveNotePitch(pat, state.SelectedNote, editV)
-			pianoCenterOnSelection(state)
+			n := &pat.Notes[state.SelectedNote]
+			target := int(n.Pitch) + editV
+			if target > 127 {
+				target = 127
+			}
+			n.Pitch = uint8(target)
+			pianoCenterOnSelectionInline(state, pat)
 		}
 
 	case "n":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[state.SelectedNote]
-			if n.Duration > editH {
-				pianoSetNoteDuration(pat, state.SelectedNote, n.Duration-editH)
+			d := n.Duration - editH
+			if d < pianoMinNoteDurationBts {
+				d = pianoMinNoteDurationBts
 			}
+			n.Duration = d
 		}
 	case "m":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
 			n := &pat.Notes[state.SelectedNote]
-			if n.Start+n.Duration+editH <= pat.Length {
-				pianoSetNoteDuration(pat, state.SelectedNote, n.Duration+editH)
+			d := n.Duration + editH
+			if n.Start+d > pat.Length {
+				d = pat.Length - n.Start
 			}
+			if d < pianoMinNoteDurationBts {
+				d = pianoMinNoteDurationBts
+			}
+			n.Duration = d
 		}
 
 	case "q":
@@ -129,37 +176,53 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 			state.EditVert--
 		}
 
-	case " ":
-		dur := pianoEditHoriz(state.EditHoriz) * 4
-		pianoAddNote(pat, state.CenterBeat, dur, uint8(state.CenterPitch), 100)
+	case " ", "space":
+		// Add a note at CenterBeat / CenterPitch, width = editH*4.
+		start := state.CenterBeat
+		if start < 0 {
+			start = 0
+		}
+		dur := editH * 4
+		if dur < pianoMinNoteDurationBts {
+			dur = pianoMinNoteDurationBts
+		}
+		if start+dur > pat.Length {
+			dur = pat.Length - start
+		}
+		if dur <= 0 {
+			break
+		}
+		pitch := uint8(state.CenterPitch)
+		pat.Notes = append(pat.Notes, devices.NoteEvent{
+			Start: start, Duration: dur, Pitch: pitch, Velocity: 100,
+		})
 		state.SelectedNote = len(pat.Notes) - 1
-		pianoCenterOnSelection(state)
 
 	case "x":
 		if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
-			pianoDeleteNote(pat, state.SelectedNote)
+			pat.Notes = append(pat.Notes[:state.SelectedNote], pat.Notes[state.SelectedNote+1:]...)
 			if state.SelectedNote >= len(pat.Notes) {
 				state.SelectedNote = len(pat.Notes) - 1
 			}
 			if state.SelectedNote >= 0 {
-				pianoCenterOnSelection(state)
+				pianoCenterOnSelectionInline(state, pat)
 			}
 		}
 
 	case "[":
 		if pat.Length > 1.0 {
-			pianoSetPatternLength(pat, pat.Length-1.0)
+			pat.Length -= 1.0
 		}
 	case "]":
 		if pat.Length < 64.0 {
-			pianoSetPatternLength(pat, pat.Length+1.0)
+			pat.Length += 1.0
 		}
 
 	case "c":
-		pianoClearPattern(pat)
+		pat.Notes = pat.Notes[:0]
 		state.SelectedNote = -1
 
-	case "<":
+	case "<", ",":
 		if state.EditingPatternIdx > 0 {
 			state.EditingPatternIdx--
 			state.SelectedNote = -1
@@ -174,13 +237,193 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 		state.Recording = !state.Recording
 	}
 
-	pianoSortNotes(pat, state)
+	// Keep notes sorted by start time; preserve the user's selection by
+	// matching start+pitch after the sort.
+	var selected *devices.NoteEvent
+	if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
+		n := pat.Notes[state.SelectedNote]
+		selected = &n
+	}
+	sort.SliceStable(pat.Notes, func(i, j int) bool {
+		return pat.Notes[i].Start < pat.Notes[j].Start
+	})
+	if selected != nil {
+		for i, n := range pat.Notes {
+			if n.Start == selected.Start && n.Pitch == selected.Pitch {
+				state.SelectedNote = i
+				break
+			}
+		}
+	}
 }
 
-// pianoRender returns the TUI view for the piano device. Stub.
-func pianoRender(track *model.Track, project *model.Project) string { return "" }
+// pianoRender returns the TUI view for the piano device. Plain text only.
+//
+// Layout:
+//
+//	header: pattern, pitch/beat center, view scale, horiz/vert edit, REC
+//	grid:   state.ViewRows pitches x N cols. rows render top (highest pitch)
+//	        to bottom (lowest). cols render startBeat..endBeat in beats
+//	        at viewScale beats-per-col.
+//	        active note starts: '(' (selected: '@')
+//	        active note body:   '-' (playhead col: '>')
+//	        empty cells:        '.' (playhead col: '|')
+//	        out-of-pattern:     ' '
+//	footer: keybinding summary.
+func pianoRender(track *model.Track, project *model.Project) string {
+	if track == nil || track.Piano == nil {
+		return ""
+	}
+	state := track.Piano
+	pat := state.Patterns[state.EditingPatternIdx]
+	if pat == nil {
+		return ""
+	}
 
-// --- lookup helpers (safe index into tables) ---
+	viewScale := pianoViewScale(state.ViewScale)
+	editH := pianoEditHoriz(state.EditHoriz)
+	editV := pianoEditVert(state.EditVert)
+
+	// How many cols of grid to draw. Use ViewRows (smushed/spread) as the
+	// pitch-row count.
+	rows := state.ViewRows
+	if rows <= 0 {
+		rows = pianoViewSpread
+	}
+	cols := int(pat.Length/viewScale) + 1
+	if cols < 16 {
+		cols = 16
+	}
+	if cols > pianoMaxCols {
+		cols = pianoMaxCols
+	}
+
+	// Viewport: center the horizontal range on CenterBeat. The top row is
+	// the highest displayed pitch; row (rows/2) holds CenterPitch.
+	beatsPerCol := viewScale
+	totalBeats := float64(cols) * beatsPerCol
+	startBeat := state.CenterBeat - totalBeats/2
+	startPitch := int(state.CenterPitch) + rows/2
+
+	playheadBeat, playheadValid := pianoPlayingBeat(track, project)
+	playheadCol := -1
+	if playheadValid && state.EditingPatternIdx == state.Schedule.Playing && playheadBeat >= startBeat {
+		playheadCol = int((playheadBeat - startBeat) / beatsPerCol)
+	}
+
+	var b strings.Builder
+
+	// Header.
+	rec := ""
+	if state.Recording {
+		rec = " REC"
+	}
+	playInfo := ""
+	if state.EditingPatternIdx != state.Schedule.Playing {
+		playInfo = fmt.Sprintf(" (playing %d)", state.Schedule.Playing+1)
+	}
+	fmt.Fprintf(&b, "Piano  Pattern %d/%d%s  Len %.2g  Center %s%d @ %.2f  View %s/col  Edit %s h, %d v%s\n\n",
+		state.EditingPatternIdx+1, devices.NumPatterns, playInfo,
+		pat.Length,
+		pianoNoteNames[int(state.CenterPitch)%12], int(state.CenterPitch)/12,
+		state.CenterBeat,
+		pianoFmtStep(viewScale), pianoFmtStep(editH), editV,
+		rec)
+
+	// Grid.
+	for row := 0; row < rows; row++ {
+		pitch := startPitch - row
+		if pitch < 0 || pitch > 127 {
+			b.WriteString("     ")
+			for col := 0; col < cols; col++ {
+				b.WriteString(" ")
+			}
+			b.WriteString("\n")
+			continue
+		}
+		fmt.Fprintf(&b, "%2s%-2d ", pianoNoteNames[pitch%12], pitch/12)
+		for col := 0; col < cols; col++ {
+			colBeat := startBeat + float64(col)*beatsPerCol
+			colBeatEnd := colBeat + beatsPerCol
+			isPlayhead := col == playheadCol
+
+			if colBeat < 0 || colBeat >= pat.Length {
+				b.WriteString(" ")
+				continue
+			}
+
+			var ch string
+			var startIdx = -1
+			hit := false
+			for i := range pat.Notes {
+				n := &pat.Notes[i]
+				if int(n.Pitch) != pitch {
+					continue
+				}
+				noteEnd := n.Start + n.Duration
+				if n.Start < colBeatEnd && noteEnd > colBeat {
+					hit = true
+					if n.Start >= colBeat && n.Start < colBeatEnd {
+						startIdx = i
+					}
+					break
+				}
+			}
+			switch {
+			case startIdx == state.SelectedNote && startIdx >= 0:
+				ch = "@"
+			case startIdx >= 0:
+				ch = "("
+			case hit && isPlayhead:
+				ch = ">"
+			case hit:
+				ch = "-"
+			case isPlayhead:
+				ch = "|"
+			default:
+				ch = "."
+			}
+			b.WriteString(ch)
+		}
+		b.WriteString("\n")
+	}
+
+	// Selected-note summary.
+	if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
+		n := &pat.Notes[state.SelectedNote]
+		fmt.Fprintf(&b, "\nSelected: %s%d  start=%.2f  dur=%.2f  vel=%d\n",
+			pianoNoteNames[int(n.Pitch)%12], int(n.Pitch)/12,
+			n.Start, n.Duration, n.Velocity)
+	}
+
+	// Footer.
+	b.WriteString("\n")
+	b.WriteString("  hjkl select   yuio move   n/m shorter/longer   space add   x delete\n")
+	b.WriteString("  q/w zoom   a/s rows   d/f horiz step   e/r vert step\n")
+	b.WriteString("  [/] length   c clear   < > pattern   R record\n")
+
+	return b.String()
+}
+
+// --- piano-view tables (zoom / edit sensitivity) ---
+
+// pianoViewScales is beats-per-column for each zoom level.
+var pianoViewScales = []float64{
+	0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0,
+}
+
+// pianoEditHorizSteps is the beat delta for each horizontal-edit sensitivity.
+var pianoEditHorizSteps = []float64{
+	0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0,
+}
+
+// pianoEditVertSteps is the semitone delta for each vertical-edit sensitivity.
+var pianoEditVertSteps = []int{1, 12}
+
+const (
+	pianoViewSmushed = 12
+	pianoViewSpread  = 24
+)
 
 func pianoViewScale(idx int) float64 {
 	if idx < 0 {
@@ -212,88 +455,34 @@ func pianoEditVert(idx int) int {
 	return pianoEditVertSteps[idx]
 }
 
-// --- spec mutators (package-private; callers hold track.mu) ---
-
-func pianoAddNote(pat *devices.PianoPattern, start, duration float64, pitch, velocity uint8) {
-	if duration < pianoMinNoteDurationBeats {
-		duration = pianoMinNoteDurationBeats
-	}
-	if start < 0 {
-		start = 0
-	}
-	if start+duration > pat.Length {
-		return
-	}
-	pat.Notes = append(pat.Notes, devices.NoteEvent{
-		Start: start, Duration: duration, Pitch: pitch, Velocity: velocity,
-	})
-}
-
-func pianoDeleteNote(pat *devices.PianoPattern, idx int) {
-	if idx < 0 || idx >= len(pat.Notes) {
-		return
-	}
-	pat.Notes = append(pat.Notes[:idx], pat.Notes[idx+1:]...)
-}
-
-func pianoMoveNoteTime(pat *devices.PianoPattern, idx int, deltaBeat float64) {
-	if idx < 0 || idx >= len(pat.Notes) {
-		return
-	}
-	n := &pat.Notes[idx]
-	n.Start += deltaBeat
-	if n.Start < 0 {
-		n.Start = 0
-	}
-	if n.Start+n.Duration > pat.Length {
-		n.Start = pat.Length - n.Duration
+// pianoFmtStep formats a beat step as a fraction (or plain number).
+func pianoFmtStep(step float64) string {
+	switch step {
+	case 0.015625:
+		return "1/64"
+	case 0.03125:
+		return "1/32"
+	case 0.0625:
+		return "1/16"
+	case 0.125:
+		return "1/8"
+	case 0.25:
+		return "1/4"
+	case 0.5:
+		return "1/2"
+	case 1.0:
+		return "1"
+	case 2.0:
+		return "2"
+	case 4.0:
+		return "4"
+	default:
+		return fmt.Sprintf("%.3f", step)
 	}
 }
 
-func pianoMoveNotePitch(pat *devices.PianoPattern, idx int, deltaSemitones int) {
-	if idx < 0 || idx >= len(pat.Notes) {
-		return
-	}
-	n := &pat.Notes[idx]
-	target := int(n.Pitch) + deltaSemitones
-	if target < 0 {
-		target = 0
-	}
-	if target > 127 {
-		target = 127
-	}
-	n.Pitch = uint8(target)
-}
-
-func pianoSetNoteDuration(pat *devices.PianoPattern, idx int, duration float64) {
-	if idx < 0 || idx >= len(pat.Notes) {
-		return
-	}
-	n := &pat.Notes[idx]
-	if duration < pianoMinNoteDurationBeats {
-		duration = pianoMinNoteDurationBeats
-	}
-	if n.Start+duration > pat.Length {
-		duration = pat.Length - n.Start
-	}
-	n.Duration = duration
-}
-
-func pianoSetPatternLength(pat *devices.PianoPattern, beats float64) {
-	if beats < 1.0 || beats > 64.0 {
-		return
-	}
-	pat.Length = beats
-}
-
-func pianoClearPattern(pat *devices.PianoPattern) {
-	pat.Notes = pat.Notes[:0]
-}
-
-// --- selection / viewport helpers ---
-
-func pianoCenterOnSelection(state *devices.Piano) {
-	pat := state.Patterns[state.EditingPatternIdx]
+// pianoCenterOnSelectionInline snaps the viewport to the selected note.
+func pianoCenterOnSelectionInline(state *devices.Piano, pat *devices.PianoPattern) {
 	if state.SelectedNote < 0 || state.SelectedNote >= len(pat.Notes) {
 		return
 	}
@@ -302,29 +491,15 @@ func pianoCenterOnSelection(state *devices.Piano) {
 	state.CenterPitch = float64(n.Pitch)
 }
 
-func pianoSelectByTime(state *devices.Piano, direction int) {
-	pat := state.Patterns[state.EditingPatternIdx]
+// pianoSelectByPitchInline walks through notes in pitch order, picking the
+// nearest-in-start-time note at the next/previous used pitch.
+func pianoSelectByPitchInline(state *devices.Piano, pat *devices.PianoPattern, direction int) {
 	if len(pat.Notes) == 0 {
 		return
 	}
-	state.SelectedNote += direction
-	if state.SelectedNote < 0 {
-		state.SelectedNote = len(pat.Notes) - 1
-	} else if state.SelectedNote >= len(pat.Notes) {
-		state.SelectedNote = 0
-	}
-	pianoCenterOnSelection(state)
-}
-
-func pianoSelectByPitch(state *devices.Piano, direction int) {
-	pat := state.Patterns[state.EditingPatternIdx]
-	if len(pat.Notes) == 0 {
-		return
-	}
-
 	if state.SelectedNote < 0 || state.SelectedNote >= len(pat.Notes) {
 		state.SelectedNote = 0
-		pianoCenterOnSelection(state)
+		pianoCenterOnSelectionInline(state, pat)
 		return
 	}
 
@@ -333,9 +508,9 @@ func pianoSelectByPitch(state *devices.Piano, direction int) {
 
 	bestIdx := -1
 	bestDist := 1000.0
-	for searchPitch := targetPitch; searchPitch >= 0 && searchPitch <= 127; searchPitch += direction {
+	for p := targetPitch; p >= 0 && p <= 127; p += direction {
 		for i, n := range pat.Notes {
-			if int(n.Pitch) != searchPitch {
+			if int(n.Pitch) != p {
 				continue
 			}
 			dist := n.Start - current.Start
@@ -354,31 +529,47 @@ func pianoSelectByPitch(state *devices.Piano, direction int) {
 			break
 		}
 	}
-
 	if bestIdx >= 0 {
 		state.SelectedNote = bestIdx
-		pianoCenterOnSelection(state)
+		pianoCenterOnSelectionInline(state, pat)
 	}
 }
 
-func pianoSortNotes(pat *devices.PianoPattern, state *devices.Piano) {
-	var selected *devices.NoteEvent
-	if state.SelectedNote >= 0 && state.SelectedNote < len(pat.Notes) {
-		n := pat.Notes[state.SelectedNote]
-		selected = &n
+// pianoPlayingBeat returns the current playback position (in beats) within
+// the editing pattern, or (0, false) when unavailable.
+func pianoPlayingBeat(track *model.Track, project *model.Project) (float64, bool) {
+	if track.Piano == nil {
+		return 0, false
 	}
-
-	sort.SliceStable(pat.Notes, func(i, j int) bool {
-		return pat.Notes[i].Start < pat.Notes[j].Start
-	})
-
-	if selected == nil {
-		return
+	playingIdx := track.Piano.Schedule.Playing
+	if playingIdx < 0 || playingIdx >= len(track.Piano.Patterns) {
+		return 0, false
 	}
-	for i, n := range pat.Notes {
-		if n.Start == selected.Start && n.Pitch == selected.Pitch {
-			state.SelectedNote = i
-			return
+	playingPat := track.Piano.Patterns[playingIdx]
+	if playingPat == nil {
+		return 0, false
+	}
+	trackIdx := -1
+	for i := 0; i < 8; i++ {
+		if project.Tracks[i] == track {
+			trackIdx = i
+			break
 		}
 	}
+	if trackIdx < 0 {
+		return 0, false
+	}
+	cursor := project.Playback.Cursors[trackIdx]
+	slot := cursor.CurrentSlot
+	if slot < 0 || slot > 1 {
+		slot = 0
+	}
+	m := playingPat.Machine[slot].Load()
+	if m == nil || m.Length <= 0 {
+		return 0, false
+	}
+	globalTick := project.Playback.Tick.Load()
+	pos := globalTick - cursor.T0Tick
+	posInPattern := ((pos % m.Length) + m.Length) % m.Length
+	return float64(posInPattern) / float64(devices.PPQ), true
 }

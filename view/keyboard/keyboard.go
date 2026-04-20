@@ -112,9 +112,9 @@ func HandleMIDI(project *model.Project, out midi.ToExternal, trackIdx int, ev mi
 	case model.DeviceDrum:
 		drumMIDI(track, project, trackIdx, out, ev)
 	case model.DevicePiano:
-		pianoMIDI(track, out, ev)
+		pianoMIDI(track, project, trackIdx, out, ev)
 	case model.DeviceMetropolix:
-		metropolixMIDI(track, out, ev)
+		metropolixMIDI(track, project, trackIdx, out, ev)
 	}
 	track.Unlock()
 	controller.MarkTrackDirty(project, trackIdx)
