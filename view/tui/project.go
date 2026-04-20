@@ -8,6 +8,7 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/system"
+	"go-sequence/theme"
 )
 
 // projectKey handles keyboard input on the project (save/load) browser view.
@@ -96,13 +97,19 @@ func projectKey(sp *system.Project, project *model.Project, ops save.SaveOps, ou
 //	edit-mode:  "Edit <kind>: <buf>_"
 //	browsing:   scrollable list of Cached saves, cursor highlighted, with a
 //	            key-help footer.
-func projectRender(sp *system.Project, project *model.Project, ops save.SaveOps) string {
+func projectRender(sp *system.Project, project *model.Project, ops save.SaveOps, th *theme.Theme) string {
 	if sp == nil {
 		return ""
 	}
 
+	titleStyle := themeStyle(th, roleFG).Bold(true)
+	cursorStyle := themeStyle(th, roleCursor).Bold(true)
+	editPromptStyle := themeStyle(th, roleAccent).Bold(true)
+	mutedStyle := themeStyle(th, roleMuted)
+
 	var b strings.Builder
-	b.WriteString("Project Browser\n\n")
+	b.WriteString(titleStyle.Render("Project Browser"))
+	b.WriteString("\n\n")
 
 	if sp.EditMode {
 		kindLabel := "?"
@@ -112,20 +119,22 @@ func projectRender(sp *system.Project, project *model.Project, ops save.SaveOps)
 		case system.EditRename:
 			kindLabel = "rename"
 		}
-		fmt.Fprintf(&b, "Edit %s: %s_\n\n", kindLabel, sp.EditBuf)
-		b.WriteString("  enter=commit   esc=cancel   backspace=delete\n")
+		b.WriteString(editPromptStyle.Render(fmt.Sprintf("Edit %s: %s_", kindLabel, sp.EditBuf)))
+		b.WriteString("\n\n  enter=commit   esc=cancel   backspace=delete\n")
 		return b.String()
 	}
 
 	if len(sp.Cached) == 0 {
-		b.WriteString("  (no saves yet — press 's' to save the current project)\n\n")
+		b.WriteString(mutedStyle.Render("  (no saves yet — press 's' to save the current project)"))
+		b.WriteString("\n\n")
 	} else {
 		for i, name := range sp.Cached {
-			mark := "  "
 			if i == sp.Cursor {
-				mark = "> "
+				b.WriteString(cursorStyle.Render(fmt.Sprintf("> %s", name)))
+			} else {
+				b.WriteString(fmt.Sprintf("  %s", name))
 			}
-			fmt.Fprintf(&b, "%s%s\n", mark, name)
+			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	}

@@ -7,6 +7,7 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
+	"go-sequence/theme"
 )
 
 // settingsKey handles keyboard input on the settings view.
@@ -69,36 +70,52 @@ func settingsKey(project *model.Project, out midi.ToExternal, focusedTrack int, 
 // mute/solo state, name, device type, port (or "-" when unset), MIDI
 // channel (1..16 to the user, 0..15 internally), and for drum tracks, the
 // kit name.
-func settingsRender(project *model.Project) string {
+func settingsRender(project *model.Project, th *theme.Theme) string {
 	if project == nil {
 		return ""
 	}
 
+	titleStyle := themeStyle(th, roleFG).Bold(true)
+	focusedStyle := themeStyle(th, roleCursor).Bold(true)
+	mutedStyle := themeStyle(th, roleMuted)
+
 	var b strings.Builder
-	b.WriteString("Settings\n\n")
+	b.WriteString(titleStyle.Render("Settings"))
+	b.WriteString("\n\n")
 
 	focused := project.UI.LastFocusedTrack
 	for i := 0; i < 8; i++ {
 		track := project.Tracks[i]
+		isFocused := i == focused
 		mark := "  "
-		if i == focused {
+		if isFocused {
 			mark = "> "
 		}
+		var line string
 		if track == nil {
-			fmt.Fprintf(&b, "%s%d  -\n", mark, i+1)
-			continue
+			line = fmt.Sprintf("%s%d  -", mark, i+1)
+		} else {
+			flags := settingsFlagsLabel(track)
+			port := track.PortName
+			if port == "" {
+				port = "-"
+			}
+			kit := ""
+			if track.Type == model.DeviceDrum {
+				kit = fmt.Sprintf("  Kit=%s", settingsKitLabel(track.Kit))
+			}
+			line = fmt.Sprintf("%s%d  %s  Name=%-10s  Type=%-10s  Port=%s  Ch=%d%s",
+				mark, i+1, flags, track.Name, sessionDeviceLabel(track.Type), port, track.Channel+1, kit)
 		}
-		flags := settingsFlagsLabel(track)
-		port := track.PortName
-		if port == "" {
-			port = "-"
+		switch {
+		case isFocused:
+			b.WriteString(focusedStyle.Render(line))
+		case track == nil:
+			b.WriteString(mutedStyle.Render(line))
+		default:
+			b.WriteString(line)
 		}
-		kit := ""
-		if track.Type == model.DeviceDrum {
-			kit = fmt.Sprintf("  Kit=%s", settingsKitLabel(track.Kit))
-		}
-		fmt.Fprintf(&b, "%s%d  %s  Name=%-10s  Type=%-10s  Port=%s  Ch=%d%s\n",
-			mark, i+1, flags, track.Name, sessionDeviceLabel(track.Type), port, track.Channel+1, kit)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")

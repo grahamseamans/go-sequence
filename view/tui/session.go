@@ -6,6 +6,7 @@ import (
 
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/theme"
 )
 
 // sessionKey handles keyboard input on the session view.
@@ -20,18 +21,24 @@ func sessionKey(project *model.Project, out midi.ToExternal, key string) {}
 // For each of the 8 tracks, a one-liner reports the device kind, the
 // currently-playing pattern (1-indexed), and the queued pattern (1-indexed,
 // "-" when nothing is queued).
-func sessionRender(project *model.Project) string {
+func sessionRender(project *model.Project, th *theme.Theme) string {
 	if project == nil {
 		return ""
 	}
 
+	titleStyle := themeStyle(th, roleFG).Bold(true)
+	queuedStyle := themeStyle(th, roleAccent)
+	mutedStyle := themeStyle(th, roleMuted)
+
 	var b strings.Builder
-	b.WriteString("Session (clip launcher)\n\n")
+	b.WriteString(titleStyle.Render("Session (clip launcher)"))
+	b.WriteString("\n\n")
 
 	for i := 0; i < 8; i++ {
 		track := project.Tracks[i]
 		if track == nil {
-			fmt.Fprintf(&b, "  Track %d  -\n", i+1)
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("  Track %d  -", i+1)))
+			b.WriteString("\n")
 			continue
 		}
 		playing, queued, ok := sessionSchedule(track)
@@ -43,8 +50,14 @@ func sessionRender(project *model.Project) string {
 		if queued >= 0 {
 			queuedStr = fmt.Sprintf("%d", queued+1)
 		}
-		fmt.Fprintf(&b, "  Track %d  [%-10s]  Playing=%d  Queued=%s\n",
-			i+1, sessionDeviceLabel(track.Type), playing+1, queuedStr)
+		fmt.Fprintf(&b, "  Track %d  [%-10s]  Playing=%d  Queued=",
+			i+1, sessionDeviceLabel(track.Type), playing+1)
+		if queued >= 0 {
+			b.WriteString(queuedStyle.Render(queuedStr))
+		} else {
+			b.WriteString(mutedStyle.Render(queuedStr))
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")

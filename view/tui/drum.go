@@ -7,6 +7,7 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
+	"go-sequence/theme"
 )
 
 // drumKey handles a keyboard event on the drum view.
@@ -155,7 +156,7 @@ func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, ke
 //	        — active step: '●' / '◉' (cursor).
 //	        — empty step: '·' / '○' (cursor).
 //	footer: key-help summary.
-func drumRender(track *model.Track, project *model.Project) string {
+func drumRender(track *model.Track, project *model.Project, th *theme.Theme) string {
 	if track == nil || track.Drum == nil {
 		return ""
 	}
@@ -175,69 +176,96 @@ func drumRender(track *model.Track, project *model.Project) string {
 
 	playingStep := drumPlayingStep(track, project)
 
+	sym := themeSymbols(th)
+	headerStyle := themeStyle(th, roleFG).Bold(true)
+	recStyle := themeStyle(th, roleWarning).Bold(true)
+	preStyle := themeStyle(th, roleAccent).Bold(true)
+	laneLblStyle := themeStyle(th, roleMuted)
+	laneSelStyle := themeStyle(th, roleAccent).Bold(true)
+	stepActiveStyle := themeStyle(th, roleActive)
+	stepPlayheadStyle := themeStyle(th, roleSuccess).Bold(true)
+	stepCursorStyle := themeStyle(th, roleCursor).Bold(true)
+	stepEmptyStyle := themeStyle(th, roleMuted)
+	stepBeyondStyle := themeStyle(th, roleMuted)
+	confirmBorderStyle := themeStyle(th, roleWarning)
+	confirmMsgStyle := themeStyle(th, roleFG).Bold(true)
+
 	var b strings.Builder
 	// Header
 	playInfo := ""
 	if state.EditingPatternIdx != state.Schedule.Playing {
 		playInfo = fmt.Sprintf(" (playing:%d)", state.Schedule.Playing+1)
 	}
-	flags := ""
+	header := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Note %d",
+		state.EditingPatternIdx+1, playInfo, state.Cursor+1, stepsPerPattern,
+		state.SelectedNoteIdx+1)
+	b.WriteString(headerStyle.Render(header))
 	if state.Recording {
-		flags += " REC"
+		b.WriteString("  ")
+		b.WriteString(recStyle.Render("REC"))
 	}
 	if state.Preview {
-		flags += " PRE"
+		b.WriteString("  ")
+		b.WriteString(preStyle.Render("PRE"))
 	}
-	fmt.Fprintf(&b, "DRUM  Pattern %d%s  Step %d/%d  Note %d%s\n\n",
-		state.EditingPatternIdx+1, playInfo, state.Cursor+1, stepsPerPattern,
-		state.SelectedNoteIdx+1, flags)
+	b.WriteString("\n\n")
 
 	// Confirm dialog takes over the body. Mirrors the old View() block.
 	if state.ConfirmKind != devices.ConfirmNone {
-		b.WriteString("─────────────────────────────────────────────────\n\n")
-		fmt.Fprintf(&b, "  %s\n\n", state.ConfirmMsg)
-		b.WriteString("  [y] Yes    [n] No\n\n")
-		b.WriteString("─────────────────────────────────────────────────\n")
+		border := "─────────────────────────────────────────────────"
+		b.WriteString(confirmBorderStyle.Render(border))
+		b.WriteString("\n\n  ")
+		b.WriteString(confirmMsgStyle.Render(state.ConfirmMsg))
+		b.WriteString("\n\n  [y] Yes    [n] No\n\n")
+		b.WriteString(confirmBorderStyle.Render(border))
+		b.WriteString("\n")
 		return b.String()
 	}
 
 	// Grid: 16 lanes, 32 columns (always full width — the old UI drew the
 	// full 32-col grid and marked "beyond length" cells specially).
 	for lane := 0; lane < 16; lane++ {
+		selected := lane == state.SelectedNoteIdx
 		selMark := " "
-		if lane == state.SelectedNoteIdx {
+		if selected {
 			selMark = ">"
 		}
-		fmt.Fprintf(&b, "%s%2d ", selMark, lane+1)
+		lbl := fmt.Sprintf("%s%2d ", selMark, lane+1)
+		if selected {
+			b.WriteString(laneSelStyle.Render(lbl))
+		} else {
+			b.WriteString(laneLblStyle.Render(lbl))
+		}
 		for step := 0; step < 32; step++ {
-			isCursor := lane == state.SelectedNoteIdx && step == state.Cursor
+			isCursor := selected && step == state.Cursor
 			// Only the selected lane shows the playhead — the playhead lives
 			// on the currently-editing pattern (see drumPlayingStep, which
 			// returns -1 when editing != playing).
-			isPlayhead := lane == state.SelectedNoteIdx && step == playingStep
+			isPlayhead := selected && step == playingStep
 			beyondLen := step >= stepsPerPattern
 			active := pat.Notes[lane].Steps[step].Active
 
-			var ch string
+			var ch rune
+			var style = stepEmptyStyle
 			switch {
 			case beyondLen && isCursor:
-				ch = "□"
+				ch, style = sym.CursorBeyond, stepBeyondStyle
 			case beyondLen:
-				ch = "-"
+				ch, style = sym.StepBeyond, stepBeyondStyle
 			case isPlayhead && isCursor:
-				ch = "▷"
+				ch, style = sym.CursorPlayhead, stepPlayheadStyle
 			case isPlayhead:
-				ch = "▶"
+				ch, style = sym.StepPlayhead, stepPlayheadStyle
 			case active && isCursor:
-				ch = "◉"
+				ch, style = sym.CursorActive, stepCursorStyle
 			case active:
-				ch = "●"
+				ch, style = sym.StepActive, stepActiveStyle
 			case isCursor:
-				ch = "○"
+				ch, style = sym.CursorEmpty, stepCursorStyle
 			default:
-				ch = "·"
+				ch, style = sym.StepEmpty, stepEmptyStyle
 			}
-			b.WriteString(ch)
+			b.WriteString(style.Render(string(ch)))
 		}
 		b.WriteString("\n")
 	}

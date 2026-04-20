@@ -7,6 +7,7 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
+	"go-sequence/theme"
 )
 
 // metropolixModeNames mirrors the PlaybackMode enum order.
@@ -312,9 +313,11 @@ func metropolixClearPattern(pat *devices.MetropolixPattern) {
 //	         GateLen). Selected stage marked with '>' above the column.
 //	footer:  key-help summary, plus accumulator sub-page indicator on page 6.
 //
-// Plain text; no styling. If a confirm dialog is active, we replace the
-// normal view with a simple Y/n prompt.
-func metropolixRender(track *model.Track, project *model.Project) string {
+// Styling is theme-driven: header, row labels, and the selected-stage column
+// are tinted; other cells are plain. When no theme is available everything
+// renders as plain text. If a confirm dialog is active we replace the normal
+// view with a simple Y/n prompt.
+func metropolixRender(track *model.Track, project *model.Project, th *theme.Theme) string {
 	if track == nil || track.Metropolix == nil {
 		return ""
 	}
@@ -332,8 +335,14 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 	}
 
 	if spec.ConfirmKind != devices.MetropolixConfirmNone {
-		return metropolixRenderConfirm(spec)
+		return metropolixRenderConfirm(spec, th)
 	}
+
+	headerStyle := themeStyle(th, roleFG).Bold(true)
+	rowLblStyle := themeStyle(th, roleMuted)
+	selPointerStyle := themeStyle(th, roleAccent).Bold(true)
+	stageNumStyle := themeStyle(th, roleFG)
+	selStageNumStyle := themeStyle(th, roleCursor).Bold(true)
 
 	var b strings.Builder
 
@@ -341,7 +350,7 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 	if spec.EditingPatternIdx != spec.Schedule.Playing {
 		playInfo = fmt.Sprintf(" (playing %d)", spec.Schedule.Playing+1)
 	}
-	fmt.Fprintf(&b, "Metropolix  Pattern %d/%d%s  Mode %s  Scale %s  Root %s  Len %d  Stage %d  Page %d:%s",
+	header := fmt.Sprintf("Metropolix  Pattern %d/%d%s  Mode %s  Scale %s  Root %s  Len %d  Stage %d  Page %d:%s",
 		spec.EditingPatternIdx+1, devices.NumPatterns, playInfo,
 		metropolixModeName(pat.Mode),
 		metropolixScaleName(pat.Scale),
@@ -352,105 +361,108 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 		metropolixPageName(spec.Page),
 	)
 	if spec.Page == 6 {
-		fmt.Fprintf(&b, "/%s", metropolixAccumSubPageName(spec.AccumSubPage))
+		header += fmt.Sprintf("/%s", metropolixAccumSubPageName(spec.AccumSubPage))
 	}
+	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n\n")
 
 	// Selection-pointer row: '>' above the selected stage column.
 	b.WriteString("           ")
 	for i := 0; i < pat.Length; i++ {
 		if i == spec.Selected {
-			b.WriteString("  >  ")
+			b.WriteString(selPointerStyle.Render("  >  "))
 		} else {
 			b.WriteString("     ")
 		}
 	}
 	b.WriteString("\n")
 
-	// Column header: stage numbers.
-	b.WriteString("Stage      ")
+	// Column header: stage numbers. Selected column highlighted.
+	b.WriteString(rowLblStyle.Render("Stage      "))
 	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, "  %d  ", i+1)
+		cell := fmt.Sprintf("  %d  ", i+1)
+		if i == spec.Selected {
+			b.WriteString(selStageNumStyle.Render(cell))
+		} else {
+			b.WriteString(stageNumStyle.Render(cell))
+		}
 	}
 	b.WriteString("\n")
+
+	selCellStyle := themeStyle(th, roleCursor).Bold(true)
+	// writeRow emits a tinted row label + a per-stage cell. cell(i) returns
+	// the formatted text for stage i; we wrap the selected stage's cell in
+	// selCellStyle so the full row visibly tracks the selection.
+	writeRow := func(label string, cell func(i int) string) {
+		b.WriteString(rowLblStyle.Render(label))
+		for i := 0; i < pat.Length; i++ {
+			s := cell(i)
+			if i == spec.Selected {
+				b.WriteString(selCellStyle.Render(s))
+			} else {
+				b.WriteString(s)
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	// Pitch row — scale-degree / octave label.
-	b.WriteString("Pitch      ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, " %-4s", metropolixStagePitchLabel(&pat.Stages[i]))
-	}
-	b.WriteString("\n")
+	writeRow("Pitch      ", func(i int) string {
+		return fmt.Sprintf(" %-4s", metropolixStagePitchLabel(&pat.Stages[i]))
+	})
 
 	// Gate row.
-	b.WriteString("Gate       ")
-	for i := 0; i < pat.Length; i++ {
+	writeRow("Gate       ", func(i int) string {
 		ch := "."
 		if pat.Stages[i].Gate {
 			ch = "X"
 		}
-		fmt.Fprintf(&b, "  %s  ", ch)
-	}
-	b.WriteString("\n")
+		return fmt.Sprintf("  %s  ", ch)
+	})
 
 	// Pulse count.
-	b.WriteString("Pulse      ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].PulseCount)
-	}
-	b.WriteString("\n")
+	writeRow("Pulse      ", func(i int) string {
+		return fmt.Sprintf("  %d  ", pat.Stages[i].PulseCount)
+	})
 
 	// Ratchets.
-	b.WriteString("Ratch      ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].Ratchets)
-	}
-	b.WriteString("\n")
+	writeRow("Ratch      ", func(i int) string {
+		return fmt.Sprintf("  %d  ", pat.Stages[i].Ratchets)
+	})
 
 	// Probability (0..100).
-	b.WriteString("Prob       ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, " %3d ", pat.Stages[i].Probability)
-	}
-	b.WriteString("\n")
+	writeRow("Prob       ", func(i int) string {
+		return fmt.Sprintf(" %3d ", pat.Stages[i].Probability)
+	})
 
 	// Slide.
-	b.WriteString("Slide      ")
-	for i := 0; i < pat.Length; i++ {
+	writeRow("Slide      ", func(i int) string {
 		ch := "."
 		if pat.Stages[i].Slide {
 			ch = "~"
 		}
-		fmt.Fprintf(&b, "  %s  ", ch)
-	}
-	b.WriteString("\n")
+		return fmt.Sprintf("  %s  ", ch)
+	})
 
 	// Accumulator (signed -4..+3).
-	b.WriteString("Accum      ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, " %+2d  ", pat.Stages[i].Accumulator)
-	}
-	b.WriteString("\n")
+	writeRow("Accum      ", func(i int) string {
+		return fmt.Sprintf(" %+2d  ", pat.Stages[i].Accumulator)
+	})
 
 	// AccumReset.
-	b.WriteString("AReset     ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, "  %d  ", pat.Stages[i].AccumReset)
-	}
-	b.WriteString("\n")
+	writeRow("AReset     ", func(i int) string {
+		return fmt.Sprintf("  %d  ", pat.Stages[i].AccumReset)
+	})
 
 	// AccumMode (short name: Rst/P-P/Hld).
-	b.WriteString("AMode      ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, " %-4s", metropolixAccumModeShort(pat.Stages[i].AccumMode))
-	}
-	b.WriteString("\n")
+	writeRow("AMode      ", func(i int) string {
+		return fmt.Sprintf(" %-4s", metropolixAccumModeShort(pat.Stages[i].AccumMode))
+	})
 
 	// GateLength.
-	b.WriteString("GateLen    ")
-	for i := 0; i < pat.Length; i++ {
-		fmt.Fprintf(&b, " %-4s", metropolixGateLengthName(pat.Stages[i].GateLength))
-	}
-	b.WriteString("\n")
+	writeRow("GateLen    ", func(i int) string {
+		return fmt.Sprintf(" %-4s", metropolixGateLengthName(pat.Stages[i].GateLength))
+	})
 
 	// Footer / key help.
 	b.WriteString("\n")
@@ -465,11 +477,14 @@ func metropolixRender(track *model.Track, project *model.Project) string {
 // metropolixRenderConfirm renders the modal clear-pattern confirm dialog.
 // The view is intentionally simple so there's no ambiguity about which
 // prompt the user is answering.
-func metropolixRenderConfirm(spec *devices.Metropolix) string {
+func metropolixRenderConfirm(spec *devices.Metropolix, th *theme.Theme) string {
+	titleStyle := themeStyle(th, roleWarning).Bold(true)
+	msgStyle := themeStyle(th, roleFG).Bold(true)
+
 	var b strings.Builder
-	b.WriteString("Metropolix — confirm\n\n")
-	b.WriteString("  ")
-	b.WriteString(spec.ConfirmMsg)
+	b.WriteString(titleStyle.Render("Metropolix — confirm"))
+	b.WriteString("\n\n  ")
+	b.WriteString(msgStyle.Render(spec.ConfirmMsg))
 	b.WriteString("\n\n")
 	b.WriteString("  [Y] Yes    [n] No    [esc] cancel\n")
 	return b.String()

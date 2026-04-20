@@ -11,6 +11,7 @@ import (
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/theme"
 	"go-sequence/view/keyboard"
 	"go-sequence/view/launchpad"
 	"go-sequence/view/tui"
@@ -52,6 +53,16 @@ func main() {
 	// SaveOps wires the project-browser view to controller/project.go file I/O.
 	saveOps := controller.NewControllerSaveOps()
 
+	// Theme — load the plasma palette from disk and build the default Theme.
+	// A missing file shouldn't crash the app; fall back to an empty palette
+	// so the TUI still renders (uncolored) and the log tells the user why.
+	palette, err := theme.LoadGPL("palettes/plasma.gpl")
+	if err != nil {
+		fmt.Printf("theme: %v — continuing with empty palette\n", err)
+		palette = &theme.Palette{}
+	}
+	th := theme.New(palette)
+
 	// Background routines — each runs in its own goroutine.
 	go controller.RunPlayback(ctx, project, ports)
 	go controller.RunPatternCompiler(ctx, project)
@@ -59,7 +70,7 @@ func main() {
 	go keyboard.RunRoutine(ctx, project, ports, ports)
 
 	// TUI blocks until the user quits (q / ctrl+c) or ctx is cancelled.
-	if err := tui.Run(ctx, project, ports, saveOps); err != nil {
+	if err := tui.Run(ctx, project, ports, saveOps, th); err != nil {
 		fmt.Printf("tui: %v\n", err)
 		os.Exit(1)
 	}

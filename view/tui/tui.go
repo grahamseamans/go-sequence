@@ -20,6 +20,7 @@ import (
 	"go-sequence/controller/devices/save"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/theme"
 )
 
 // tickMsg is the periodic redraw trigger. Bubbletea doesn't auto-redraw;
@@ -29,8 +30,8 @@ type tickMsg time.Time
 // Run starts the Bubbletea program and blocks until it exits. The context
 // is held by the Model so a cancellation from main propagates into the
 // program.
-func Run(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps) error {
-	m := newModel(ctx, project, out, saveOps)
+func Run(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps, th *theme.Theme) error {
+	m := newModel(ctx, project, out, saveOps, th)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -43,14 +44,16 @@ type Model struct {
 	project *model.Project
 	out     midi.ToExternal
 	saveOps save.SaveOps
+	theme   *theme.Theme
 }
 
-func newModel(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps) *Model {
+func newModel(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps, th *theme.Theme) *Model {
 	return &Model{
 		ctx:     ctx,
 		project: project,
 		out:     out,
 		saveOps: saveOps,
+		theme:   th,
 	}
 }
 
@@ -83,7 +86,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the TUI frame by dispatching to the focused domain's render.
 func (m *Model) View() string {
-	return Render(m.project, m.saveOps)
+	return Render(m.project, m.saveOps, m.theme)
 }
 
 // HandleKey dispatches one keystroke to the focused domain's handler.
@@ -185,7 +188,7 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 }
 
 // Render returns the composed TUI frame for the focused domain.
-func Render(project *model.Project, saveOps save.SaveOps) string {
+func Render(project *model.Project, saveOps save.SaveOps, th *theme.Theme) string {
 	switch project.UI.Focus.Kind {
 	case model.FocusTrack:
 		idx := project.UI.Focus.Track
@@ -195,20 +198,20 @@ func Render(project *model.Project, saveOps save.SaveOps) string {
 		}
 		switch track.Type {
 		case model.DeviceDrum:
-			return drumRender(track, project)
+			return drumRender(track, project, th)
 		case model.DevicePiano:
-			return pianoRender(track, project)
+			return pianoRender(track, project, th)
 		case model.DeviceMetropolix:
-			return metropolixRender(track, project)
+			return metropolixRender(track, project, th)
 		default:
-			return emptyRender(project)
+			return emptyRender(project, th)
 		}
 	case model.FocusSession:
-		return sessionRender(project)
+		return sessionRender(project, th)
 	case model.FocusSettings:
-		return settingsRender(project)
+		return settingsRender(project, th)
 	case model.FocusProject:
-		return projectRender(&project.UI.SystemProject, project, saveOps)
+		return projectRender(&project.UI.SystemProject, project, saveOps, th)
 	}
 	return ""
 }

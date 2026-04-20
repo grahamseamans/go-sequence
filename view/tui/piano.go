@@ -10,6 +10,7 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
+	"go-sequence/theme"
 	"go-sequence/widgets"
 )
 
@@ -21,20 +22,26 @@ const (
 
 var pianoNoteNames = []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 
-// Piano TUI styling. Flat palette — no runtime theme wiring yet; the
-// per-role colors here match the old sequencer's launchpad LED colors so
-// the TUI and launchpad reads as the same instrument. If/when we wire
-// theme.Theme in, these move into theme.Palette roles.
-var (
-	pianoStyleHeader   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#d4d4ff"))
-	pianoStyleRec      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff3030"))
-	pianoStylePitchLbl = lipgloss.NewStyle().Foreground(lipgloss.Color("#8a8aaa"))
-	pianoStyleEmpty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#3a3a48"))
-	pianoStyleNote     = lipgloss.NewStyle().Foreground(lipgloss.Color("#50c8ff"))
-	pianoStyleSelected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff64c8"))
-	pianoStylePlayhead = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
-	pianoStyleOOB      = lipgloss.NewStyle().Foreground(lipgloss.Color("#24242c"))
-)
+// pianoStyles is the set of lipgloss styles pianoRender draws with. Built
+// fresh per render from the active theme (cheap — styles are value types).
+// If the theme is unavailable every field falls back to an unstyled style
+// so the view still renders plainly.
+type pianoStyles struct {
+	header, rec, pitchLbl, empty, note, selected, playhead, oob lipgloss.Style
+}
+
+func pianoBuildStyles(th *theme.Theme) pianoStyles {
+	return pianoStyles{
+		header:   themeStyle(th, roleFG).Bold(true),
+		rec:      themeStyle(th, roleWarning).Bold(true),
+		pitchLbl: themeStyle(th, roleMuted),
+		empty:    themeStyle(th, roleMuted),
+		note:     themeStyle(th, roleAccent),
+		selected: themeStyle(th, roleCursor).Bold(true),
+		playhead: themeStyle(th, roleSuccess).Bold(true),
+		oob:      themeStyle(th, roleMuted),
+	}
+}
 
 // pianoKey handles a keyboard event on the piano view.
 //
@@ -289,7 +296,7 @@ func pianoKey(track *model.Track, project *model.Project, out midi.ToExternal, k
 //	          out-of-pattern: -
 //	selected: single line with pitch / start / duration / velocity.
 //	help:     widgets.RenderKeyHelp sections for all keybindings.
-func pianoRender(track *model.Track, project *model.Project) string {
+func pianoRender(track *model.Track, project *model.Project, th *theme.Theme) string {
 	if track == nil || track.Piano == nil {
 		return ""
 	}
@@ -298,6 +305,9 @@ func pianoRender(track *model.Track, project *model.Project) string {
 	if pat == nil {
 		return ""
 	}
+
+	styles := pianoBuildStyles(th)
+	sym := themeSymbols(th)
 
 	viewScale := pianoViewScale(state.ViewScale)
 	editH := pianoEditHoriz(state.EditHoriz)
@@ -345,13 +355,13 @@ func pianoRender(track *model.Track, project *model.Project) string {
 		pat.Length,
 		pianoNoteNames[int(state.CenterPitch)%12], int(state.CenterPitch)/12,
 		state.CenterBeat)
-	b.WriteString(pianoStyleHeader.Render(header))
+	b.WriteString(styles.header.Render(header))
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "View: %s/col %s  Edit: %s horiz, %d semi vert",
 		pianoFmtStep(viewScale), vertMode, pianoFmtStep(editH), editV)
 	if state.Recording {
 		b.WriteString("  ")
-		b.WriteString(pianoStyleRec.Render("● REC"))
+		b.WriteString(styles.rec.Render(string(sym.StepActive) + " REC"))
 	}
 	b.WriteString("\n\n")
 
@@ -367,14 +377,14 @@ func pianoRender(track *model.Track, project *model.Project) string {
 			continue
 		}
 		label := fmt.Sprintf("%2s%-2d ", pianoNoteNames[pitch%12], pitch/12)
-		b.WriteString(pianoStylePitchLbl.Render(label))
+		b.WriteString(styles.pitchLbl.Render(label))
 		for col := 0; col < cols; col++ {
 			colBeat := startBeat + float64(col)*beatsPerCol
 			colBeatEnd := colBeat + beatsPerCol
 			isPlayhead := col == playheadCol
 
 			if colBeat < 0 || colBeat >= pat.Length {
-				b.WriteString(pianoStyleOOB.Render("-"))
+				b.WriteString(styles.oob.Render(string(sym.StepBeyond)))
 				continue
 			}
 
@@ -401,21 +411,26 @@ func pianoRender(track *model.Track, project *model.Project) string {
 			var style lipgloss.Style
 			switch {
 			case startIdx == state.SelectedNote && startIdx >= 0:
-				ch, style = "◉", pianoStyleSelected
+				ch, style = string(sym.CursorActive), styles.selected
 			case startIdx >= 0 && isPlayhead:
-				ch, style = "▶", pianoStylePlayhead
+				ch, style = string(sym.StepPlayhead), styles.playhead
 			case startIdx >= 0:
-				ch, style = "●", pianoStyleNote
+				ch, style = string(sym.StepActive), styles.note
 			case hitCount > 1:
-				ch, style = "═", pianoStyleNote
+				// Sustained-note body with >=2 overlapping notes — use a
+				// heavier rune than a simple step-active. Not in the theme's
+				// Symbols set; keep the literal.
+				ch, style = "═", styles.note
 			case hitCount == 1 && isPlayhead:
-				ch, style = "▶", pianoStylePlayhead
+				ch, style = string(sym.StepPlayhead), styles.playhead
 			case hitCount == 1:
-				ch, style = "─", pianoStyleNote
+				// Sustained-note body — thin horizontal line. Also not in
+				// Symbols; keep the literal.
+				ch, style = "─", styles.note
 			case isPlayhead:
-				ch, style = "▶", pianoStylePlayhead
+				ch, style = string(sym.StepPlayhead), styles.playhead
 			default:
-				ch, style = "·", pianoStyleEmpty
+				ch, style = string(sym.StepEmpty), styles.empty
 			}
 			b.WriteString(style.Render(ch))
 		}
