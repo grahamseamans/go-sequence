@@ -10,6 +10,7 @@ package launchpad
 
 import (
 	"context"
+	"time"
 
 	"go-sequence/controller"
 	"go-sequence/controller/devices/save"
@@ -25,6 +26,9 @@ import (
 // if pad events are still buffered.
 func RunRoutine(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps, surf Surface) {
 	padCh := surf.PadEvents()
+	ledTicker := time.NewTicker(16 * time.Millisecond) // ~60 Hz
+	defer ledTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -34,6 +38,8 @@ func RunRoutine(ctx context.Context, project *model.Project, out midi.ToExternal
 				return
 			}
 			HandlePad(project, out, saveOps, ev)
+		case <-ledTicker.C:
+			surf.SetLEDs(RenderLEDs(project, saveOps))
 		}
 	}
 }

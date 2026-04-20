@@ -12,6 +12,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -20,6 +21,10 @@ import (
 	"go-sequence/midi"
 	"go-sequence/model"
 )
+
+// tickMsg is the periodic redraw trigger. Bubbletea doesn't auto-redraw;
+// Init seeds the first tick and Update re-arms it on every fire.
+type tickMsg time.Time
 
 // Run starts the Bubbletea program and blocks until it exits. The context
 // is held by the Model so a cancellation from main propagates into the
@@ -49,8 +54,10 @@ func newModel(ctx context.Context, project *model.Project, out midi.ToExternal, 
 	}
 }
 
-// Init is Bubbletea's startup hook; no initial commands yet.
-func (m *Model) Init() tea.Cmd { return nil }
+// Init is Bubbletea's startup hook. Seeds the 30 Hz redraw tick.
+func (m *Model) Init() tea.Cmd {
+	return tea.Tick(33*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
 
 // Update handles tea.Msg events. Keystrokes route through HandleKey; a
 // ctx cancellation exits the program.
@@ -68,6 +75,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		HandleKey(m.project, m.out, m.saveOps, key)
+	case tickMsg:
+		return m, tea.Tick(33*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 	}
 	return m, nil
 }

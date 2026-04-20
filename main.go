@@ -37,10 +37,16 @@ func main() {
 	}
 	defer ports.Close()
 
-	// Control surface — Mock for now (no Launchpad auto-discovery yet).
-	// Swap in launchpad.NewLaunchpad(...) once the port-discovery story
-	// from the old midi.DeviceManager lands in the new stack.
-	surf := launchpad.NewMock()
+	// Control surface — probe for a real Launchpad; fall back to Mock so the
+	// rest of the app (TUI, playback, keyboard) still runs headless when no
+	// hardware is connected.
+	var surf launchpad.Surface
+	if lp, err := launchpad.OpenLaunchpad(); err == nil {
+		surf = lp
+	} else {
+		fmt.Printf("launchpad: %v — falling back to mock\n", err)
+		surf = launchpad.NewMock()
+	}
 	defer surf.Close()
 
 	// SaveOps wires the project-browser view to controller/project.go file I/O.
