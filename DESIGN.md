@@ -27,19 +27,7 @@ The "drum device" is a real conceptual entity (the user thinks about it that way
 
 ## 3. Principles
 
-4. **View is reactive — `view = f(model)`.** Renders model state. Captures user input gestures and interprets them, then calls controller functions to mutate state. View never holds state of its own. Controller never calls view.
-
-6. **View owns UI input loops** (pad presses, terminal keyboard) — knows the launchpad surface for both rendering and input. Reads `project.UI.Focus`, dispatches to `view/devices/<kind>.HandlePad(state, project, row, col)` which interprets the gesture and calls controller mutators.
-
-7. **Controller owns external input loops** — `controller.RunMidiInput(ctx, project, midiPorts)` subscribes per-track to `(port, channel)` and dispatches MIDI events to controller mutators (e.g., `drum.RecordEvent`). MIDI input is external hardware, not UI gestures.
-
-8. **Playback is a pure-walker function.** `controller.RunPlayback(ctx, project)` is the goroutine entry point. it reads from the model and puts that information out of the midi device. On each tick it computes where the playhead should be (the playhead is not stored) and then it reads that midi data, and it shoots it out.
-
-9. **Views trigger compile.** they call the controler to change the state of the human pattern and then recompile the machine pattern, it signals compile (via channel send).
-
-10. **Fresh rolls every loop.** When playback wraps and swaps in `next_events`, signals compile to produce new `next_events` with a fresh seed. - this is for randomness
-
-
+4. **View is reactive — `view = f(model)`.** Renders model state. Captures user input gestures and interprets them, then mutates state. View never holds state of its own. Controller never calls view.
 
 
 basic vibe (from human, so badly written, but actually good design hopefully)
