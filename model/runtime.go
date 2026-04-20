@@ -43,8 +43,11 @@ type FocusTarget struct {
 
 // UIState holds all transient UI state that isn't per-track device state.
 type UIState struct {
-	Focus            FocusTarget
-	LastFocusedTrack int // remembered when user navigates away from a track view
+	// Focus identifies the active UI region. Focus.Track always names the
+	// most-recently-focused track, regardless of Focus.Kind — so Settings /
+	// Session / Project handlers can read Focus.Track to know which track
+	// they're operating on when the user navigates away from the track view.
+	Focus FocusTarget
 
 	// KeyboardRoute is the track index (0..7) that external MIDI keyboard
 	// input is routed to. One keyboard, one destination track at a time.

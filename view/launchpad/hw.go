@@ -2,12 +2,19 @@ package launchpad
 
 import (
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"go-sequence/debug"
 
 	gomidi "gitlab.com/gomidi/midi/v2"
 	"gitlab.com/gomidi/midi/v2/drivers"
 )
+
+// padChanBuffer sizes the pad-event channel. Input bursts during fast
+// playing can stack briefly; 128 is enough headroom that healthy consumers
+// never hit the cap. If we ever DO saturate, sendPad logs it so we notice.
+const padChanBuffer = 128
 
 // Launchpad is a Novation Launchpad X control surface.
 type Launchpad struct {
@@ -17,6 +24,18 @@ type Launchpad struct {
 	send     func(msg gomidi.Message) error
 	stopFunc func()
 	padChan  chan PadEvent
+
+	// padDropCount tracks pad-events dropped because padChan was full.
+	// padDropLastLog rate-limits the log to once per second — otherwise a
+	// stuck consumer would flood the debug log at hundreds of events/sec.
+	padDropCount   atomic.Uint64
+	padDropLastLog atomic.Int64
+
+	// Same rate-limiting for LED send errors. Each SetLEDs call can emit up
+	// to ~81 NoteOn messages at 60Hz; raw error-per-LED logs would drown
+	// everything else. Count them, log once per second.
+	ledErrCount   atomic.Uint64
+	ledErrLastLog atomic.Int64
 }
 
 // NewLaunchpad opens and configures a Launchpad X.
@@ -25,7 +44,7 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 		id:      id,
 		inPort:  inPort,
 		outPort: outPort,
-		padChan: make(chan PadEvent, 32),
+		padChan: make(chan PadEvent, padChanBuffer),
 	}
 
 	// Open output
@@ -36,17 +55,19 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 		}
 		lp.send = send
 
-		// Send SysEx to switch to Programmer mode
-		// F0 00 20 29 02 0C 00 7F F7
-		lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x00, 0x7F}))
-
-		// Set brightness to maximum (0-127)
-		// F0 00 20 29 02 0C 08 <brightness> F7
-		lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x08, 0x7F}))
-
-		// Enable external LED feedback
-		// F0 00 20 29 02 0C 0A 01 01 F7
-		lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x0A, 0x01, 0x01}))
+		// SysEx init: Programmer mode, brightness, external LED feedback.
+		// Failures here are logged and accepted — the launchpad may still
+		// be usable in whatever mode it was left in; better to continue
+		// than to crash the whole app over a SysEx hiccup.
+		if err := lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x00, 0x7F})); err != nil {
+			debug.Log("lp-init", "SysEx programmer-mode failed: %v", err)
+		}
+		if err := lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x08, 0x7F})); err != nil {
+			debug.Log("lp-init", "SysEx brightness failed: %v", err)
+		}
+		if err := lp.send(gomidi.SysEx([]byte{0x00, 0x20, 0x29, 0x02, 0x0C, 0x0A, 0x01, 0x01})); err != nil {
+			debug.Log("lp-init", "SysEx external-LED-feedback failed: %v", err)
+		}
 	}
 
 	// Open input
@@ -63,10 +84,7 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 				}
 				down := velocity > 0
 				debug.Log("lp-in", "NoteOn note=%d vel=%d -> row=%d col=%d down=%v", note, velocity, row, col, down)
-				select {
-				case lp.padChan <- PadEvent{Row: row, Col: col, Down: down}:
-				default:
-				}
+				lp.sendPad(PadEvent{Row: row, Col: col, Down: down})
 				return
 			}
 			if msg.GetNoteOff(&channel, &note, &velocity) {
@@ -75,10 +93,7 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 					return
 				}
 				debug.Log("lp-in", "NoteOff note=%d -> row=%d col=%d", note, row, col)
-				select {
-				case lp.padChan <- PadEvent{Row: row, Col: col, Down: false}:
-				default:
-				}
+				lp.sendPad(PadEvent{Row: row, Col: col, Down: false})
 				return
 			}
 
@@ -90,10 +105,7 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 				}
 				down := value > 0
 				debug.Log("lp-in", "CC cc=%d value=%d -> row=%d col=%d down=%v", cc, value, row, col, down)
-				select {
-				case lp.padChan <- PadEvent{Row: row, Col: col, Down: down}:
-				default:
-				}
+				lp.sendPad(PadEvent{Row: row, Col: col, Down: down})
 			}
 		})
 		if err != nil {
@@ -108,17 +120,63 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 // PadEvents returns the channel of pad press/release events.
 func (lp *Launchpad) PadEvents() <-chan PadEvent { return lp.padChan }
 
+// sendPad is a non-blocking send on padChan that counts drops and logs
+// them at most once per second. Callers invoke this from the gomidi
+// listener callback — blocking there would stall all MIDI input.
+//
+// Drops shouldn't happen in practice (buffer is 128, consumer runs at
+// 60Hz) but if they ever do we want to know about it rather than eat
+// the user's pad press silently.
+func (lp *Launchpad) sendPad(ev PadEvent) {
+	select {
+	case lp.padChan <- ev:
+		return
+	default:
+	}
+	lp.padDropCount.Add(1)
+	now := time.Now().UnixNano()
+	last := lp.padDropLastLog.Load()
+	if now-last < int64(time.Second) {
+		return
+	}
+	if !lp.padDropLastLog.CompareAndSwap(last, now) {
+		return
+	}
+	dropped := lp.padDropCount.Swap(0)
+	debug.Log("lp-in", "dropped %d pad events in the last second (consumer stalled)", dropped)
+}
+
 // SetLEDs sends LED updates to the Launchpad. Each LED's RGB is mapped to
 // the closest Launchpad X palette color and sent as a channel-0 NoteOn.
+// Send errors are counted and logged at most once per second — a broken
+// cable shouldn't take the app down, but the user should see that LED
+// output is failing.
 func (lp *Launchpad) SetLEDs(leds []LED) {
 	if lp.send == nil || len(leds) == 0 {
 		return
 	}
+	var frameErr error
 	for _, led := range leds {
 		note := rowColToNote(led.Row, led.Col)
 		color := mapRGBToLaunchpad(led.R, led.G, led.B)
-		lp.send(gomidi.NoteOn(0, note, color))
+		if err := lp.send(gomidi.NoteOn(0, note, color)); err != nil {
+			lp.ledErrCount.Add(1)
+			frameErr = err
+		}
 	}
+	if frameErr == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := lp.ledErrLastLog.Load()
+	if now-last < int64(time.Second) {
+		return
+	}
+	if !lp.ledErrLastLog.CompareAndSwap(last, now) {
+		return
+	}
+	count := lp.ledErrCount.Swap(0)
+	debug.Log("lp-out", "LED send errors: %d in the last second (latest: %v)", count, frameErr)
 }
 
 // Close clears all LEDs, stops the input listener, and closes the pad channel.

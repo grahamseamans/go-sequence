@@ -1,13 +1,10 @@
 // Package tui is the terminal-UI view surface. Renders text via Bubbletea,
 // captures keystrokes, and dispatches to per-domain key handlers.
 //
-// Architecture (DESIGN §3.6): views own UI input loops. Run starts the
+// Architecture (DESIGN): views own UI input loops. Run starts the
 // Bubbletea program; keystrokes flow through HandleKey which dispatches to
-// the focused domain's keyboard handler. Render dispatches per-domain.
-//
-// This file is a skeleton — the actual rendering bodies are stubbed in
-// per-domain files (drum.go, piano.go, ...). Full wiring of the Bubbletea
-// model against those stubs will land in a later commit.
+// the focused domain's keyboard handler. Render dispatches per-domain and
+// each domain renders its own slice of the frame.
 package tui
 
 import (
@@ -111,7 +108,6 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 	case "1", "2", "3", "4", "5", "6", "7", "8":
 		idx := int(key[0] - '1')
 		project.UI.Focus = model.FocusTarget{Kind: model.FocusTrack, Track: idx}
-		project.UI.LastFocusedTrack = idx
 		return
 	case ",":
 		project.UI.Focus.Kind = model.FocusSettings
@@ -156,7 +152,7 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		sessionKey(project, out, key)
 
 	case model.FocusSettings:
-		idx := project.UI.LastFocusedTrack
+		idx := project.UI.Focus.Track
 		tgt := project.Tracks[idx]
 		if tgt != nil {
 			tgt.Lock()

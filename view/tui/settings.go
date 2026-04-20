@@ -66,7 +66,7 @@ func settingsKey(project *model.Project, out midi.ToExternal, focusedTrack int, 
 // settingsRender returns the TUI view for the settings page.
 //
 // Layout: one line per track. The currently-focused track (from
-// project.UI.LastFocusedTrack) is marked with '>'. Each line shows index,
+// project.UI.Focus.Track) is marked with '>'. Each line shows index,
 // mute/solo state, name, device type, port (or "-" when unset), MIDI
 // channel (1..16 to the user, 0..15 internally), and for drum tracks, the
 // kit name.
@@ -83,7 +83,7 @@ func settingsRender(project *model.Project, th *theme.Theme) string {
 	b.WriteString(titleStyle.Render("Settings"))
 	b.WriteString("\n\n")
 
-	focused := project.UI.LastFocusedTrack
+	focused := project.UI.Focus.Track
 	for i := 0; i < 8; i++ {
 		track := project.Tracks[i]
 		isFocused := i == focused

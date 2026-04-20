@@ -94,9 +94,9 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		}
 
 	case model.FocusSettings:
-		// Settings edits fields on Tracks[LastFocusedTrack]. Lock that track
+		// Settings edits fields on Tracks[Focus.Track]. Lock that track
 		// around the handler.
-		idx := project.UI.LastFocusedTrack
+		idx := project.UI.Focus.Track
 		tgt := project.Tracks[idx]
 		if tgt != nil {
 			tgt.Lock()

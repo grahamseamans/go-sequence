@@ -91,10 +91,11 @@ func startSubscription(ctx context.Context, project *model.Project, out midi.ToE
 	}()
 }
 
-// HandleMIDI dispatches one MIDI event to the routed track's device handler.
-// Always bumps the track's edit counter — any recording device may have
-// mutated spec, and non-recording devices' handlers are a no-op so the extra
-// recompile is effectively a cheap false positive we accept for simplicity.
+// HandleMIDI dispatches one MIDI event to the routed track's device handler
+// and marks the track dirty so the compile routine refills its Machine
+// slots. Non-recording devices are no-ops in the per-domain handlers so
+// the extra recompile on an idle MIDI stream is a cheap false positive we
+// accept for simplicity.
 func HandleMIDI(project *model.Project, out midi.ToExternal, trackIdx int, ev midi.Event) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return

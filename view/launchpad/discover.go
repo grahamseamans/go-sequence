@@ -12,10 +12,8 @@ import (
 // matching output, and returns a configured *Launchpad. Returns an error
 // if no Launchpad is found. Callers should fall back to NewMock on error.
 //
-// Ported from the old midi.DeviceManager.tryConnect (see git history —
-// commit a945b09 and earlier). Matches by lowercase substring "launchpad"
-// in the port name; the output port name is derived by replacing "In"
-// with "Out" in the input name (matches the old behavior).
+// Matches by lowercase substring "launchpad" in the port name; the output
+// port name is derived by replacing "In" with "Out" in the input name.
 func OpenLaunchpad() (*Launchpad, error) {
 	inPorts := gomidi.GetInPorts()
 	outPorts := gomidi.GetOutPorts()
