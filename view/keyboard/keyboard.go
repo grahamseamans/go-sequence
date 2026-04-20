@@ -110,7 +110,7 @@ func HandleMIDI(project *model.Project, out midi.ToExternal, trackIdx int, ev mi
 	track.Lock()
 	switch track.Type {
 	case model.DeviceDrum:
-		drumMIDI(track, out, ev)
+		drumMIDI(track, project, trackIdx, out, ev)
 	case model.DevicePiano:
 		pianoMIDI(track, out, ev)
 	case model.DeviceMetropolix:
