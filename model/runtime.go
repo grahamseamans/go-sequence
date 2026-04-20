@@ -48,14 +48,32 @@ type UIState struct {
 
 	// KeyboardRoute is the track index (0..7) that external MIDI keyboard
 	// input is routed to. One keyboard, one destination track at a time.
-	// Defaults to 0.
+	// Defaults to 0. Writers go through SetKeyboardRoute so the keyboard
+	// routine wakes up without polling.
 	KeyboardRoute int
+
+	// KeyboardRouteChanged is a size-1 buffered channel. SetKeyboardRoute
+	// does a non-blocking send; the keyboard goroutine selects on it to
+	// pick up route changes immediately. json:"-" — runtime-only.
+	KeyboardRouteChanged chan struct{} `json:"-"`
 
 	// SystemProject is the entire project-browser widget state (cursor,
 	// edit-mode buffer, cached save list). Lives here — not in a separate
 	// singleton — because it's UI state belonging to the project, and
 	// model/system is a leaf package.
 	SystemProject system.Project `json:"-"`
+}
+
+// SetKeyboardRoute atomically updates the keyboard route and non-blocking-
+// signals the keyboard goroutine. Writers must use this instead of
+// writing KeyboardRoute directly — the channel signal is how the
+// keyboard routine learns about the change without polling.
+func SetKeyboardRoute(project *Project, trackIdx int) {
+	project.UI.KeyboardRoute = trackIdx
+	select {
+	case project.UI.KeyboardRouteChanged <- struct{}{}:
+	default:
+	}
 }
 
 // PlaybackState is the runtime transport and per-track cursor state owned by

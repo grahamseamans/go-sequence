@@ -12,7 +12,6 @@ package keyboard
 
 import (
 	"context"
-	"time"
 
 	"go-sequence/controller"
 	"go-sequence/debug"
@@ -20,45 +19,42 @@ import (
 	"go-sequence/model"
 )
 
-// routePoll is how often RunRoutine rechecks project.UI.KeyboardRoute for
-// changes. Fine-grained polling keeps the wiring simple (no cross-goroutine
-// notification) at the cost of a ~100ms lag when the user reroutes — well
-// inside human perception tolerance for a routing gesture.
-const routePoll = 100 * time.Millisecond
-
 // RunRoutine is the keyboard goroutine entry point. Subscribes to the
 // currently-routed track's MIDI port, dispatches events until the route
 // changes or ctx is canceled, then loops to re-subscribe with the new
 // route. Blocks until ctx is done.
+//
+// Route changes are picked up via project.UI.KeyboardRouteChanged — writers
+// call model.SetKeyboardRoute which non-blocking-sends on that channel.
 func RunRoutine(ctx context.Context, project *model.Project, out midi.ToExternal, in midi.FromExternal) {
 	// subCancel is nil until the first route takes effect; after that, every
-	// overwrite of subCancel pairs with exactly one cancel() call (either in
-	// the route-change branch below or in the final deferred cleanup).
+	// overwrite of subCancel pairs with exactly one cancel() call.
 	var subCancel context.CancelFunc = func() {}
 	defer func() { subCancel() }()
 
 	curRoute := -1
+	apply := func() {
+		desired := project.UI.KeyboardRoute
+		if desired == curRoute {
+			return
+		}
+		subCancel()
+		curRoute = desired
+		subCtx, cancel := context.WithCancel(ctx)
+		subCancel = cancel
+		startSubscription(subCtx, project, out, in, desired)
+	}
 
-	ticker := time.NewTicker(routePoll)
-	defer ticker.Stop()
+	// Prime the initial subscription.
+	apply()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-project.UI.KeyboardRouteChanged:
+			apply()
 		}
-
-		desiredRoute := project.UI.KeyboardRoute
-		if desiredRoute == curRoute {
-			continue
-		}
-		// Route changed — tear down old subscription, spin up new one.
-		subCancel()
-		curRoute = desiredRoute
-		subCtx, cancel := context.WithCancel(ctx)
-		subCancel = cancel
-		startSubscription(subCtx, project, out, in, desiredRoute)
 	}
 }
 

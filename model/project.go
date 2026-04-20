@@ -65,6 +65,9 @@ func New() *Project {
 	p := &Project{
 		Tempo:   120,
 		Compile: NewCompileState(),
+		UI: UIState{
+			KeyboardRouteChanged: make(chan struct{}, 1),
+		},
 	}
 	for i := 0; i < 8; i++ {
 		p.Tracks[i] = &Track{
