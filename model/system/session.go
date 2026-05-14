@@ -1,7 +1,13 @@
 package system
 
-// Session holds UI state for the session-view (pattern launcher) grid.
-// Currently empty — the session view reads Schedule from each track and
-// writes directly via its mutator. Defined here to keep the layer
-// structure uniform.
-type Session struct{}
+// Session holds UI state for the session-view (clip launcher) grid.
+//
+// Cursor selects a (track, pattern) cell in the 8 × NumPatterns grid.
+// CursorTrack is in [0, 7]; CursorPattern is in [0, NumPatterns-1].
+// ViewOffset scrolls the visible window vertically when NumPatterns
+// exceeds the available row count.
+type Session struct {
+	CursorTrack   int
+	CursorPattern int
+	ViewOffset    int
+}

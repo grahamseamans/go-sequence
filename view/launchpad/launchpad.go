@@ -73,10 +73,11 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		}
 
 	case model.FocusSession:
-		// Session mutates Schedule.Queued on project.Tracks[ev.Row]. Lock
-		// THAT track (not the currently-focused track). The "dirty" pattern
-		// is the queued column itself — mark it so its Machine slots are
-		// ready by the time playback wraps into it.
+		// Session mutates the track cursor's QueuedPattern on
+		// project.Tracks[ev.Row]. Lock THAT track (not the currently-
+		// focused track). The "dirty" pattern is the queued column itself
+		// — mark it so its Machine slots are ready by the time playback
+		// wraps into it.
 		if ev.Row < 0 || ev.Row >= 8 {
 			return
 		}

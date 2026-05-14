@@ -14,14 +14,25 @@ import (
 // just a JSON tag.
 
 // Cursor is the per-track playback anchor. The playhead itself is NOT
-// stored — it's computed every tick as (globalTick - T0Tick), per DESIGN
-// ("we dont store the playhead itself, and calculate it each time for
-// each pattern instead"). The cursor only stores WHEN the currently-
-// playing pattern started (in global ticks) and which Machine slot of
-// that pattern playback is reading.
+// stored — it's computed every tick as (globalTick - T0Tick), per DESIGN.
+// All per-track playback state lives here:
+//
+//   - CurrentPattern: index of the pattern this track is currently
+//     playing. Reads from track.<Device>.Patterns[CurrentPattern].
+//   - QueuedPattern: index of the pattern that will start at the next
+//     pattern boundary, or -1 when nothing is queued. Writers (TUI / pad
+//     handlers) just set this; the playback engine swaps it into
+//     CurrentPattern on wrap.
+//   - T0Tick: the global tick at which CurrentPattern started playing.
+//   - CurrentSlot: which Machine slot (0 or 1) playback is reading.
+//
+// Runtime-only — Cursor is not persisted to save files. Loading a project
+// resets every track to (CurrentPattern=0, QueuedPattern=-1).
 type Cursor struct {
-	T0Tick      int64 // global tick at which the current pattern started playing
-	CurrentSlot int   // 0 or 1 — which Machine slot playback is reading
+	CurrentPattern int
+	T0Tick         int64
+	CurrentSlot    int
+	QueuedPattern  int
 }
 
 // FocusKind selects which domain is active in the UI.
@@ -65,6 +76,14 @@ type UIState struct {
 	// singleton — because it's UI state belonging to the project, and
 	// model/system is a leaf package.
 	SystemProject system.Project `json:"-"`
+
+	// SystemSession holds the session-view cursor (track, pattern) for
+	// keyboard-driven clip launching from the TUI.
+	SystemSession system.Session `json:"-"`
+
+	// SystemSettings holds the settings-view cursor (row, col) and modal
+	// picker state for editing track configuration from the TUI.
+	SystemSettings system.Settings `json:"-"`
 }
 
 // SetKeyboardRoute atomically updates the keyboard route and non-blocking-

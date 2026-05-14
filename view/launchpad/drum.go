@@ -245,7 +245,17 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	if track.Drum == nil {
 		return -1
 	}
-	playingIdx := track.Drum.Schedule.Playing
+	// Resolve the track's index in project.Tracks; prefer the UI focus as
+	// a fast path, fall back to linear search if it doesn't line up.
+	trackIdx := project.UI.Focus.Track
+	if trackIdx < 0 || trackIdx >= 8 || project.Tracks[trackIdx] != track {
+		trackIdx = project.TrackIndex(track)
+		if trackIdx < 0 {
+			return -1
+		}
+	}
+	cursor := project.Playback.Cursors[trackIdx]
+	playingIdx := cursor.CurrentPattern
 	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
 		return -1
 	}
@@ -253,22 +263,6 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	if playingPat == nil {
 		return -1
 	}
-	// Resolve the track's index in project.Tracks; prefer the UI focus as
-	// a fast path, fall back to linear search if it doesn't line up.
-	trackIdx := project.UI.Focus.Track
-	if trackIdx < 0 || trackIdx >= 8 || project.Tracks[trackIdx] != track {
-		trackIdx = -1
-		for i := 0; i < 8; i++ {
-			if project.Tracks[i] == track {
-				trackIdx = i
-				break
-			}
-		}
-		if trackIdx < 0 {
-			return -1
-		}
-	}
-	cursor := project.Playback.Cursors[trackIdx]
 	slot := cursor.CurrentSlot
 	if slot < 0 || slot > 1 {
 		slot = 0

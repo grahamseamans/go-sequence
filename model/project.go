@@ -33,14 +33,16 @@ type Project struct {
 // Metropolix is non-nil when Type names a device; all three are nil when
 // Type == DeviceNone. mu guards the track's spec fields against concurrent
 // reads (Compiler, View) and writes (input router).
+//
+// Mute / solo are deliberately NOT on the track — those belong in the
+// downstream mixer the user is sending MIDI to, not in the sequencer.
+// To silence a track from the sequencer, stop the pattern instead.
 type Track struct {
 	Name       string              `json:"name"`
 	Channel    uint8               `json:"channel"`
 	PortName   string              `json:"portName,omitempty"`
 	Type       DeviceKind          `json:"type"`
 	Kit        string              `json:"kit,omitempty"`
-	Muted      bool                `json:"muted"`
-	Solo       bool                `json:"solo"`
 	mu         sync.RWMutex        `json:"-"`
 	Drum       *devices.Drum       `json:"drum,omitempty"`
 	Piano      *devices.Piano      `json:"piano,omitempty"`
@@ -60,7 +62,8 @@ func (t *Track) RLock() { t.mu.RLock() }
 func (t *Track) RUnlock() { t.mu.RUnlock() }
 
 // New constructs a fresh Project with default tempo, eight initialized
-// tracks (all DeviceNone), and a ready CompileState channel.
+// tracks (all DeviceNone), a ready CompileState channel, and per-track
+// playback cursors initialized to "pattern 0, nothing queued".
 func New() *Project {
 	p := &Project{
 		Tempo:   120,
@@ -76,8 +79,21 @@ func New() *Project {
 			Type:    DeviceNone,
 			Kit:     "",
 		}
+		p.Playback.Cursors[i] = Cursor{QueuedPattern: -1}
 	}
 	return p
+}
+
+// TrackIndex returns the index of t within p.Tracks, or -1 when t isn't
+// found. Cheap (8 pointer compares); used by view + controller code
+// that has a *Track and needs to reach into project.Playback.Cursors[i].
+func (p *Project) TrackIndex(t *Track) int {
+	for i, tt := range p.Tracks {
+		if tt == t {
+			return i
+		}
+	}
+	return -1
 }
 
 // ReplacePersisted copies the persisted fields (Tempo, Tracks) from src into

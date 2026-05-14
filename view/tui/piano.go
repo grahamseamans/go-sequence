@@ -332,9 +332,15 @@ func pianoRender(track *model.Track, project *model.Project, th *theme.Theme) st
 	startBeat := state.CenterBeat - totalBeats/2
 	startPitch := int(state.CenterPitch) + rows/2
 
+	trackIdx := project.TrackIndex(track)
+	playingIdx := 0
+	if trackIdx >= 0 {
+		playingIdx = project.Playback.Cursors[trackIdx].CurrentPattern
+	}
+
 	playheadBeat, playheadValid := pianoPlayingBeat(track, project)
 	playheadCol := -1
-	if playheadValid && state.EditingPatternIdx == state.Schedule.Playing && playheadBeat >= startBeat {
+	if playheadValid && state.EditingPatternIdx == playingIdx && playheadBeat >= startBeat {
 		playheadCol = int((playheadBeat - startBeat) / beatsPerCol)
 	}
 
@@ -347,8 +353,8 @@ func pianoRender(track *model.Track, project *model.Project, th *theme.Theme) st
 
 	// Header — pattern, position, view, edit, rec.
 	playInfo := ""
-	if state.EditingPatternIdx != state.Schedule.Playing {
-		playInfo = fmt.Sprintf(" (playing %d)", state.Schedule.Playing+1)
+	if state.EditingPatternIdx != playingIdx {
+		playInfo = fmt.Sprintf(" (playing %d)", playingIdx+1)
 	}
 	header := fmt.Sprintf("PIANO  Pattern %d/%d%s  Len %.2g  Center %s%d @ %.2f",
 		state.EditingPatternIdx+1, devices.NumPatterns, playInfo,
@@ -474,9 +480,41 @@ func pianoRender(track *model.Track, project *model.Project, th *theme.Theme) st
 			{Key: "R", Desc: "record toggle"},
 		}},
 	}))
+	b.WriteString("\n\n")
+	b.WriteString(pianoRenderLaunchpadHelp())
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// pianoRenderLaunchpadHelp renders the Launchpad reference for the piano
+// device: the 8×8 main grid (note pads), right-column scene buttons, and a
+// dim top control row. Colors match the pre-refactor sequencer/pianoroll.go
+// renderLaunchpadHelp().
+func pianoRenderLaunchpadHelp() string {
+	topRowColor := [3]uint8{111, 10, 126}
+	gridColor := [3]uint8{80, 200, 255}
+	sceneColor := [3]uint8{148, 18, 126}
+
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+	topRow := make([][3]uint8, 8)
+
+	for i := 0; i < 8; i++ {
+		topRow[i] = topRowColor
+		rightCol[i] = sceneColor
+	}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = gridColor
+		}
+	}
+
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+	out += widgets.RenderLegendItem(gridColor, "Notes", "tap to add/select notes") + "\n"
+	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch scenes")
+	return out
 }
 
 // --- piano-view tables (zoom / edit sensitivity) ---
@@ -615,7 +653,12 @@ func pianoPlayingBeat(track *model.Track, project *model.Project) (float64, bool
 	if track.Piano == nil {
 		return 0, false
 	}
-	playingIdx := track.Piano.Schedule.Playing
+	trackIdx := project.TrackIndex(track)
+	if trackIdx < 0 {
+		return 0, false
+	}
+	cursor := project.Playback.Cursors[trackIdx]
+	playingIdx := cursor.CurrentPattern
 	if playingIdx < 0 || playingIdx >= len(track.Piano.Patterns) {
 		return 0, false
 	}
@@ -623,17 +666,6 @@ func pianoPlayingBeat(track *model.Track, project *model.Project) (float64, bool
 	if playingPat == nil {
 		return 0, false
 	}
-	trackIdx := -1
-	for i := 0; i < 8; i++ {
-		if project.Tracks[i] == track {
-			trackIdx = i
-			break
-		}
-	}
-	if trackIdx < 0 {
-		return 0, false
-	}
-	cursor := project.Playback.Cursors[trackIdx]
 	slot := cursor.CurrentSlot
 	if slot < 0 || slot > 1 {
 		slot = 0

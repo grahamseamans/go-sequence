@@ -8,6 +8,7 @@ import (
 	"go-sequence/model"
 	"go-sequence/model/devices"
 	"go-sequence/theme"
+	"go-sequence/widgets"
 )
 
 // metropolixModeNames mirrors the PlaybackMode enum order.
@@ -347,8 +348,13 @@ func metropolixRender(track *model.Track, project *model.Project, th *theme.Them
 	var b strings.Builder
 
 	playInfo := ""
-	if spec.EditingPatternIdx != spec.Schedule.Playing {
-		playInfo = fmt.Sprintf(" (playing %d)", spec.Schedule.Playing+1)
+	trackIdx := project.TrackIndex(track)
+	playingIdx := 0
+	if trackIdx >= 0 {
+		playingIdx = project.Playback.Cursors[trackIdx].CurrentPattern
+	}
+	if spec.EditingPatternIdx != playingIdx {
+		playInfo = fmt.Sprintf(" (playing %d)", playingIdx+1)
 	}
 	header := fmt.Sprintf("Metropolix  Pattern %d/%d%s  Mode %s  Scale %s  Root %s  Len %d  Stage %d  Page %d:%s",
 		spec.EditingPatternIdx+1, devices.NumPatterns, playInfo,
@@ -471,7 +477,52 @@ func metropolixRender(track *model.Track, project *model.Project, th *theme.Them
 	b.WriteString("  [/] length   </> scale   z/x root    m mode   {/} prev/next pattern\n")
 	b.WriteString("  f/F page cycle   !@#$%^&* (shift+1..8) direct page   c clear pattern\n")
 
+	// Launchpad reference at the bottom — pages on the right column, stage
+	// grid in the middle. Ported from sequencer/metropolix.go renderLaunchpadHelp().
+	b.WriteString("\n")
+	b.WriteString(metropolixRenderLaunchpadHelp())
+	b.WriteString("\n")
+
 	return b.String()
+}
+
+// metropolixRenderLaunchpadHelp renders the Launchpad reference for the
+// Metropolix device: dim top row, 8×8 stage grid, page-select scene
+// column, and a per-scene legend explaining what each page does.
+func metropolixRenderLaunchpadHelp() string {
+	pageColor := [3]uint8{200, 100, 255}
+	gridColor := [3]uint8{255, 100, 50}
+	offColor := [3]uint8{30, 30, 30}
+
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = gridColor
+		}
+	}
+	for row := 0; row < 8; row++ {
+		rightCol[row] = pageColor
+	}
+	topRow := make([][3]uint8, 8)
+	for i := range topRow {
+		topRow[i] = offColor
+	}
+
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+	out += widgets.RenderLegendItem(pageColor, "Pages", "select parameter page") + "\n"
+	out += "    Scene 7 → Settings (mode, scale, length, root, slide time)\n"
+	out += "    Scene 6 → Octave (0-7 per stage)\n"
+	out += "    Scene 5 → Notes (scale degree 0-7 per stage)\n"
+	out += "    Scene 4 → Pulse Count (1-8 per stage)\n"
+	out += "    Scene 3 → Ratchets (1-8 per stage)\n"
+	out += "    Scene 2 → Gate (rows 7-2: length, row 1: on/off, row 0: slide)\n"
+	out += "    Scene 1 → Probability (0-100% per stage)\n"
+	out += "    Scene 0 → Accumulator (sub-pages: value/reset/mode via top row)\n"
+	out += widgets.RenderLegendItem(gridColor, "Grid", "8 columns = 8 stages, 8 rows = values")
+	return out
 }
 
 // metropolixRenderConfirm renders the modal clear-pattern confirm dialog.

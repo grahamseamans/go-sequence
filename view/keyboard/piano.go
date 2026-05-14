@@ -137,7 +137,8 @@ func pianoPlaybackBeat(track *model.Track, project *model.Project, trackIdx int)
 	if trackIdx < 0 || trackIdx >= 8 {
 		return -1
 	}
-	playingIdx := track.Piano.Schedule.Playing
+	cursor := project.Playback.Cursors[trackIdx]
+	playingIdx := cursor.CurrentPattern
 	if playingIdx < 0 || playingIdx >= len(track.Piano.Patterns) {
 		return -1
 	}
@@ -145,7 +146,6 @@ func pianoPlaybackBeat(track *model.Track, project *model.Project, trackIdx int)
 	if playingPat == nil {
 		return -1
 	}
-	cursor := project.Playback.Cursors[trackIdx]
 	slot := cursor.CurrentSlot
 	if slot < 0 || slot > 1 {
 		slot = 0

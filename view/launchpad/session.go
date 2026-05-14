@@ -23,9 +23,8 @@ var (
 //	row in [0,7] is the track index (row 0 = track 0, top of the grid).
 //	col in [0,7] is the pattern index on that track.
 //
-// Caller (HandlePad in launchpad.go) already locked the target track and
-// will call MarkPatternDirty(project, row, col) after this returns. We
-// just mutate Schedule.Queued on the track's device.
+// Writes QueuedPattern on the track's cursor; the playback engine
+// promotes it to CurrentPattern at the next pattern boundary.
 func sessionPad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
@@ -37,26 +36,10 @@ func sessionPad(project *model.Project, out midi.ToExternal, row, col int, down 
 		return
 	}
 	track := project.Tracks[row]
-	if track == nil {
+	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
-
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum != nil {
-			track.Drum.Schedule.Queued = col
-		}
-	case model.DevicePiano:
-		if track.Piano != nil {
-			track.Piano.Schedule.Queued = col
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix != nil {
-			track.Metropolix.Schedule.Queued = col
-		}
-	case model.DeviceNone:
-		// No device on this track — nothing to queue.
-	}
+	project.Playback.Cursors[row].QueuedPattern = col
 }
 
 // sessionLEDs renders the 8x8 LED frame for the session view.
@@ -82,8 +65,9 @@ func sessionLEDs(project *model.Project) []LED {
 			}
 			continue
 		}
+		cursor := project.Playback.Cursors[row]
 		for col := 0; col < 8; col++ {
-			c := sessionCellColor(track, col)
+			c := sessionCellColor(track, cursor, col)
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
 	}
@@ -93,48 +77,24 @@ func sessionLEDs(project *model.Project) []LED {
 // sessionCellColor picks the LED color for one cell of the session grid.
 // Precedence: playing > queued > has-content > empty. Tracks without a
 // device never reach this — caller filters them.
-func sessionCellColor(track *model.Track, col int) LED {
+func sessionCellColor(track *model.Track, cursor model.Cursor, col int) LED {
+	if cursor.CurrentPattern == col {
+		return sessionPlaying
+	}
+	if cursor.QueuedPattern == col {
+		return sessionQueued
+	}
 	switch track.Type {
 	case model.DeviceDrum:
-		if track.Drum == nil {
-			return sessionEmpty
-		}
-		sch := track.Drum.Schedule
-		if sch.Playing == col {
-			return sessionPlaying
-		}
-		if sch.Queued == col {
-			return sessionQueued
-		}
-		if sessionDrumPatternHasContent(track.Drum.Patterns[col]) {
+		if track.Drum != nil && sessionDrumPatternHasContent(track.Drum.Patterns[col]) {
 			return sessionHasContent
 		}
 	case model.DevicePiano:
-		if track.Piano == nil {
-			return sessionEmpty
-		}
-		sch := track.Piano.Schedule
-		if sch.Playing == col {
-			return sessionPlaying
-		}
-		if sch.Queued == col {
-			return sessionQueued
-		}
-		if sessionPianoPatternHasContent(track.Piano.Patterns[col]) {
+		if track.Piano != nil && sessionPianoPatternHasContent(track.Piano.Patterns[col]) {
 			return sessionHasContent
 		}
 	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return sessionEmpty
-		}
-		sch := track.Metropolix.Schedule
-		if sch.Playing == col {
-			return sessionPlaying
-		}
-		if sch.Queued == col {
-			return sessionQueued
-		}
-		if sessionMetropolixPatternHasContent(track.Metropolix.Patterns[col]) {
+		if track.Metropolix != nil && sessionMetropolixPatternHasContent(track.Metropolix.Patterns[col]) {
 			return sessionHasContent
 		}
 	}

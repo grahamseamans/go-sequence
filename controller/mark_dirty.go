@@ -51,9 +51,9 @@ func MarkTrackDirty(project *model.Project, trackIdx int) {
 	MarkPatternDirty(project, trackIdx, patternIdx)
 }
 
-// MarkPlayingDirty is like MarkTrackDirty but targets the currently-playing
-// pattern (Schedule.Playing) rather than the editing one. Used after project
-// load to prime the Machine slots playback will read from.
+// MarkPlayingDirty is like MarkTrackDirty but targets the cursor's
+// CurrentPattern rather than the editing one. Used after project load to
+// prime the Machine slots playback will read from.
 func MarkPlayingDirty(project *model.Project, trackIdx int) {
 	if trackIdx < 0 || trackIdx >= 8 {
 		return
@@ -62,27 +62,7 @@ func MarkPlayingDirty(project *model.Project, trackIdx int) {
 	if track == nil || track.Type == model.DeviceNone {
 		return
 	}
-	var patternIdx int
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum == nil {
-			return
-		}
-		patternIdx = track.Drum.Schedule.Playing
-	case model.DevicePiano:
-		if track.Piano == nil {
-			return
-		}
-		patternIdx = track.Piano.Schedule.Playing
-	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return
-		}
-		patternIdx = track.Metropolix.Schedule.Playing
-	default:
-		return
-	}
-	MarkPatternDirty(project, trackIdx, patternIdx)
+	MarkPatternDirty(project, trackIdx, project.Playback.Cursors[trackIdx].CurrentPattern)
 }
 
 // MarkPatternDirty trashes both Machine slots of the named pattern on the

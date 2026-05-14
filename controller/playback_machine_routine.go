@@ -162,13 +162,13 @@ func resolveCurrent(project *model.Project, track *model.Track, trackIdx int) (i
 		slot = 0
 		cursor.CurrentSlot = 0
 	}
+	idx := cursor.CurrentPattern
 
 	switch track.Type {
 	case model.DeviceDrum:
 		if track.Drum == nil {
 			return 0, nil
 		}
-		idx := track.Drum.Schedule.Playing
 		if idx < 0 || idx >= len(track.Drum.Patterns) {
 			return 0, nil
 		}
@@ -181,7 +181,6 @@ func resolveCurrent(project *model.Project, track *model.Track, trackIdx int) (i
 		if track.Piano == nil {
 			return 0, nil
 		}
-		idx := track.Piano.Schedule.Playing
 		if idx < 0 || idx >= len(track.Piano.Patterns) {
 			return 0, nil
 		}
@@ -194,7 +193,6 @@ func resolveCurrent(project *model.Project, track *model.Track, trackIdx int) (i
 		if track.Metropolix == nil {
 			return 0, nil
 		}
-		idx := track.Metropolix.Schedule.Playing
 		if idx < 0 || idx >= len(track.Metropolix.Patterns) {
 			return 0, nil
 		}
@@ -207,18 +205,20 @@ func resolveCurrent(project *model.Project, track *model.Track, trackIdx int) (i
 	return 0, nil
 }
 
-// dispatch sends a single event through MIDI out, honoring track.Muted.
+// dispatch sends a single event through MIDI out for the track's
+// configured port + channel. Track-level muting was intentionally removed
+// — silencing a track is the user's mixer's job; from the sequencer side
+// you stop the pattern instead.
 func dispatch(out midi.ToExternal, track *model.Track, ev devices.TimedEvent) {
-	if track == nil || track.Muted {
+	if track == nil {
 		return
 	}
-	// TODO(solo): honor Track.Solo across all tracks.
 	_ = out.Send(track.PortName, track.Channel, ev.Event)
 }
 
 // handleWrap runs per-track bookkeeping when the cursor crosses a pattern
-// boundary: trash consumed slot, promote Schedule.Queued, advance T0Tick,
-// flip CurrentSlot, signal compile to refill.
+// boundary: trash consumed slot, promote QueuedPattern → CurrentPattern,
+// advance T0Tick, flip CurrentSlot, signal compile to refill.
 func handleWrap(project *model.Project, trackIdx int, oldPatternIdx int, oldLength int64) {
 	track := project.Tracks[trackIdx]
 	if track == nil {
@@ -229,29 +229,12 @@ func handleWrap(project *model.Project, trackIdx int, oldPatternIdx int, oldLeng
 
 	trashSlot(track, oldPatternIdx, trashedSlot)
 
-	track.Lock()
 	newPatternIdx := oldPatternIdx
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum != nil && track.Drum.Schedule.Queued != -1 {
-			track.Drum.Schedule.Playing = track.Drum.Schedule.Queued
-			track.Drum.Schedule.Queued = -1
-			newPatternIdx = track.Drum.Schedule.Playing
-		}
-	case model.DevicePiano:
-		if track.Piano != nil && track.Piano.Schedule.Queued != -1 {
-			track.Piano.Schedule.Playing = track.Piano.Schedule.Queued
-			track.Piano.Schedule.Queued = -1
-			newPatternIdx = track.Piano.Schedule.Playing
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix != nil && track.Metropolix.Schedule.Queued != -1 {
-			track.Metropolix.Schedule.Playing = track.Metropolix.Schedule.Queued
-			track.Metropolix.Schedule.Queued = -1
-			newPatternIdx = track.Metropolix.Schedule.Playing
-		}
+	if cursor.QueuedPattern != -1 {
+		newPatternIdx = cursor.QueuedPattern
+		cursor.CurrentPattern = newPatternIdx
+		cursor.QueuedPattern = -1
 	}
-	track.Unlock()
 
 	cursor.T0Tick += oldLength
 	cursor.CurrentSlot = 1 - trashedSlot
@@ -297,9 +280,11 @@ func trashSlot(track *model.Track, patternIdx, slot int) {
 	}
 }
 
-// Play starts the transport. Anchors wall-clock T0, resets the tick counter,
-// zeros every cursor (T0Tick=0, CurrentSlot=0), and primes both Machine slots
-// of each track's currently-playing pattern.
+// Play starts the transport. Anchors wall-clock T0, resets the tick counter
+// and the transport-related cursor fields (T0Tick, CurrentSlot, QueuedPattern),
+// preserves CurrentPattern so playback resumes on whatever pattern the user
+// last had selected, and primes both Machine slots of that pattern on every
+// track.
 //
 // Tick/LastGlobalTick start at -1 so the FIRST processTick call enters at
 // globalTick=0 with a (-1, 0] walk window that includes tick 0 (the downbeat).
@@ -311,7 +296,12 @@ func Play(project *model.Project) {
 	project.Playback.Tick.Store(-1)
 	project.Playback.LastGlobalTick.Store(-1)
 	for i := range project.Playback.Cursors {
-		project.Playback.Cursors[i] = model.Cursor{T0Tick: 0, CurrentSlot: 0}
+		c := &project.Playback.Cursors[i]
+		c.T0Tick = 0
+		c.CurrentSlot = 0
+		c.QueuedPattern = -1
+		// CurrentPattern is preserved — playback resumes on the pattern
+		// the clip launcher had selected.
 	}
 	if project.Playback.Tempo.Load() <= 0 {
 		project.Playback.Tempo.Store(int64(project.Tempo))
@@ -323,23 +313,7 @@ func Play(project *model.Project) {
 		if track == nil || track.Type == model.DeviceNone {
 			continue
 		}
-		var patternIdx int
-		track.RLock()
-		switch track.Type {
-		case model.DeviceDrum:
-			if track.Drum != nil {
-				patternIdx = track.Drum.Schedule.Playing
-			}
-		case model.DevicePiano:
-			if track.Piano != nil {
-				patternIdx = track.Piano.Schedule.Playing
-			}
-		case model.DeviceMetropolix:
-			if track.Metropolix != nil {
-				patternIdx = track.Metropolix.Schedule.Playing
-			}
-		}
-		track.RUnlock()
+		patternIdx := project.Playback.Cursors[i].CurrentPattern
 		requestCompile(project, i, patternIdx, 0)
 		requestCompile(project, i, patternIdx, 1)
 	}
@@ -370,10 +344,12 @@ func SetTempo(project *model.Project, bpm int) {
 	}
 }
 
-// ResetCursors zeroes every track's cursor. Called after project load.
+// ResetCursors returns every track's cursor to the initial state:
+// pattern 0 playing, nothing queued, slot 0, T0 at tick 0. Called after
+// project load and from main.go at startup.
 func ResetCursors(project *model.Project) {
 	for i := range project.Playback.Cursors {
-		project.Playback.Cursors[i] = model.Cursor{}
+		project.Playback.Cursors[i] = model.Cursor{QueuedPattern: -1}
 	}
 }
 

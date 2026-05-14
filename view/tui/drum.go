@@ -8,6 +8,7 @@ import (
 	"go-sequence/model"
 	"go-sequence/model/devices"
 	"go-sequence/theme"
+	"go-sequence/widgets"
 )
 
 // drumKey handles a keyboard event on the drum view.
@@ -193,8 +194,13 @@ func drumRender(track *model.Track, project *model.Project, th *theme.Theme) str
 	var b strings.Builder
 	// Header
 	playInfo := ""
-	if state.EditingPatternIdx != state.Schedule.Playing {
-		playInfo = fmt.Sprintf(" (playing:%d)", state.Schedule.Playing+1)
+	trackIdx := project.TrackIndex(track)
+	playingIdx := 0
+	if trackIdx >= 0 {
+		playingIdx = project.Playback.Cursors[trackIdx].CurrentPattern
+	}
+	if state.EditingPatternIdx != playingIdx {
+		playInfo = fmt.Sprintf(" (playing:%d)", playingIdx+1)
 	}
 	header := fmt.Sprintf("DRUM  Pattern %d%s  Step %d/%d  Note %d",
 		state.EditingPatternIdx+1, playInfo, state.Cursor+1, stepsPerPattern,
@@ -272,11 +278,82 @@ func drumRender(track *model.Track, project *model.Project, th *theme.Theme) str
 
 	// Footer / key-help
 	b.WriteString("\n")
-	b.WriteString("  h/l move cursor   j/k select lane   space/x toggle step\n")
-	b.WriteString("  [ / ]  shorten/lengthen pattern     < >  prev/next pattern\n")
-	b.WriteString("  c clear lane   C clear pattern   r record   p preview\n")
+	b.WriteString(widgets.RenderKeyHelp([]widgets.KeySection{
+		{Keys: []widgets.KeyBinding{
+			{Key: "h / l", Desc: "move cursor left/right through steps"},
+			{Key: "j / k", Desc: "select lane up/down"},
+			{Key: "space / x", Desc: "toggle step on/off"},
+			{Key: "[ / ]", Desc: "shorten/lengthen pattern"},
+			{Key: "c", Desc: "clear lane (with confirm)"},
+			{Key: "C", Desc: "clear pattern (with confirm)"},
+			{Key: "< / >", Desc: "previous/next pattern"},
+			{Key: "r", Desc: "toggle record-arm"},
+			{Key: "p", Desc: "toggle preview-arm"},
+		}},
+	}))
+
+	// Launchpad reference at the bottom, ported from the old
+	// sequencer/drum.go renderLaunchpadHelp().
+	b.WriteString("\n\n")
+	b.WriteString(drumRenderLaunchpadHelp())
+	b.WriteString("\n")
 
 	return b.String()
+}
+
+// drumRenderLaunchpadHelp renders the Launchpad reference for the drum
+// device: top control row, 4×8 step grid, 4×4 lane-select pads, 4×4 command
+// pads, and the right-column scene buttons. Colors and layout match the
+// pre-refactor sequencer/drum.go renderLaunchpadHelp() so the user has the
+// same visual map of the hardware.
+func drumRenderLaunchpadHelp() string {
+	topRowColor := [3]uint8{111, 10, 126}
+	stepsColor := [3]uint8{234, 73, 116}
+	noteColor := [3]uint8{148, 18, 126}
+	commandsColor := [3]uint8{253, 157, 110}
+	sceneColor := [3]uint8{71, 13, 121}
+
+	var grid [8][8][3]uint8
+	var rightCol [8][3]uint8
+
+	// Top 4 rows: steps.
+	for row := 4; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			grid[row][col] = stepsColor
+		}
+	}
+	// Bottom-left 4×4: lane select.
+	for row := 0; row < 4; row++ {
+		for col := 0; col < 4; col++ {
+			grid[row][col] = noteColor
+		}
+	}
+	// Bottom-right 4×4: commands.
+	for row := 0; row < 4; row++ {
+		for col := 4; col < 8; col++ {
+			grid[row][col] = commandsColor
+		}
+	}
+	for i := 0; i < 8; i++ {
+		rightCol[i] = sceneColor
+	}
+	topRow := make([][3]uint8, 8)
+	for i := range topRow {
+		topRow[i] = topRowColor
+	}
+
+	out := widgets.RenderPadRow(topRow) + "\n"
+	out += widgets.RenderPadGrid(grid, &rightCol) + "\n\n"
+	out += widgets.RenderLegendItem(stepsColor, "Steps", "tap to toggle steps 1-32") + "\n"
+	out += widgets.RenderLegendItem(noteColor, "Lane", "select lane 1-16 (plays sound in preview mode)") + "\n"
+	out += widgets.RenderLegendItem(commandsColor, "Commands", "") + "\n"
+	out += "    Row 3: [Preview] [Record]  (Mute)   (Solo)\n"
+	out += "    Row 2: (Vel -)   (Vel +)   (-)      (-)\n"
+	out += "    Row 1: (Nudge<)  (Nudge>)  [Len -]  [Len +]\n"
+	out += "    Row 0: [ClrLane] [ClrPat]  (Copy)   (Paste)\n"
+	out += "    [ ] = implemented, ( ) = not yet\n"
+	out += widgets.RenderLegendItem(sceneColor, "Scene", "launch scenes")
+	return out
 }
 
 // drumLaneHasAnyStep returns true if any step in the lane is active.
@@ -306,19 +383,6 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	if track.Drum == nil {
 		return -1
 	}
-	playingIdx := track.Drum.Schedule.Playing
-	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
-		return -1
-	}
-	playingPat := track.Drum.Patterns[playingIdx]
-	if playingPat == nil {
-		return -1
-	}
-	if track.Drum.EditingPatternIdx != playingIdx {
-		// Playhead only makes sense on the pattern the user is editing; the
-		// edit and playing patterns differ, so don't draw a playhead.
-		return -1
-	}
 	trackIdx := -1
 	for i := 0; i < 8; i++ {
 		if project.Tracks[i] == track {
@@ -330,6 +394,19 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 		return -1
 	}
 	cursor := project.Playback.Cursors[trackIdx]
+	playingIdx := cursor.CurrentPattern
+	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
+		return -1
+	}
+	if track.Drum.EditingPatternIdx != playingIdx {
+		// Playhead only makes sense when the user is editing the same
+		// pattern that's playing. Different patterns => no playhead drawn.
+		return -1
+	}
+	playingPat := track.Drum.Patterns[playingIdx]
+	if playingPat == nil {
+		return -1
+	}
 	slot := cursor.CurrentSlot
 	if slot < 0 || slot > 1 {
 		slot = 0

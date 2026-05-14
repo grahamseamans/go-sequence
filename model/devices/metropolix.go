@@ -97,7 +97,6 @@ const (
 // destructive actions (clear-pattern) in the TUI.
 type Metropolix struct {
 	Patterns          [NumPatterns]*MetropolixPattern `json:"patterns"`
-	Schedule          Schedule                        `json:"schedule"`
 	EditingPatternIdx int                             `json:"editingPattern"`
 	Page              int                             `json:"page"`
 	Selected          int                             `json:"selected"`
@@ -106,10 +105,10 @@ type Metropolix struct {
 	ConfirmMsg        string                          `json:"-"`
 }
 
-// Validate clamps Metropolix fields into valid ranges.
+// Validate clamps Metropolix fields into valid ranges. Per-track playback
+// state (current / queued pattern) lives on the runtime Cursor and is
+// validated by the project, not the device.
 func (m *Metropolix) Validate() {
-	m.Schedule.Validate(NumPatterns)
-
 	if m.EditingPatternIdx < 0 {
 		m.EditingPatternIdx = 0
 	} else if m.EditingPatternIdx > NumPatterns-1 {

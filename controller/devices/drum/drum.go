@@ -24,7 +24,7 @@ const noteDurationTicks int64 = 60
 // Pure: no I/O, no mutation of spec, no globals. Same (pattern, kit, seed)
 // → same output. The caller picks which pattern to render (the Compiler
 // goroutine reads track.Drum.Patterns[req.Pattern] and passes it in), so
-// the Schedule.Playing indirection no longer lives here.
+// the cursor.CurrentPattern indirection no longer lives here.
 //
 // Signature diverges from DESIGN.md §5.4: Compile takes an explicit
 // `kit devices.Kit` because the kit lives on the Track, not on the Drum

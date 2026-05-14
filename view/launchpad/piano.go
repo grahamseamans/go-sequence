@@ -280,7 +280,12 @@ func pianoPlayingCol(track *model.Track, project *model.Project, startBeat, view
 	if track.Piano == nil {
 		return -1
 	}
-	playingIdx := track.Piano.Schedule.Playing
+	trackIdx := project.TrackIndex(track)
+	if trackIdx < 0 {
+		return -1
+	}
+	cursor := project.Playback.Cursors[trackIdx]
+	playingIdx := cursor.CurrentPattern
 	if playingIdx < 0 || playingIdx >= len(track.Piano.Patterns) {
 		return -1
 	}
@@ -291,17 +296,6 @@ func pianoPlayingCol(track *model.Track, project *model.Project, startBeat, view
 	if track.Piano.EditingPatternIdx != playingIdx {
 		return -1
 	}
-	trackIdx := -1
-	for i := 0; i < 8; i++ {
-		if project.Tracks[i] == track {
-			trackIdx = i
-			break
-		}
-	}
-	if trackIdx < 0 {
-		return -1
-	}
-	cursor := project.Playback.Cursors[trackIdx]
 	slot := cursor.CurrentSlot
 	if slot < 0 || slot > 1 {
 		slot = 0

@@ -52,7 +52,6 @@ const (
 // destructive actions (clear-lane, clear-pattern) in the TUI.
 type Drum struct {
 	Patterns          [NumPatterns]*DrumPattern `json:"patterns"`
-	Schedule          Schedule                  `json:"schedule"`
 	EditingPatternIdx int                       `json:"editingPattern"`
 	SelectedNoteIdx   int                       `json:"selectedNote"`
 	Cursor            int                       `json:"cursor"`
@@ -63,9 +62,9 @@ type Drum struct {
 }
 
 // Validate clamps Drum fields into valid ranges and fills in defaults.
+// Per-track playback state (current / queued pattern) lives on the
+// runtime Cursor and is validated by the project, not the device.
 func (d *Drum) Validate() {
-	d.Schedule.Validate(NumPatterns)
-
 	if d.EditingPatternIdx < 0 {
 		d.EditingPatternIdx = 0
 	} else if d.EditingPatternIdx > NumPatterns-1 {

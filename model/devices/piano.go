@@ -38,7 +38,6 @@ type PianoPending struct {
 // fields) stay at stable heap addresses.
 type Piano struct {
 	Patterns          [NumPatterns]*PianoPattern `json:"patterns"`
-	Schedule          Schedule                   `json:"schedule"`
 	EditingPatternIdx int                        `json:"editingPattern"`
 	CenterBeat        float64                    `json:"centerBeat"`
 	CenterPitch       float64                    `json:"centerPitch"`
@@ -55,10 +54,10 @@ type Piano struct {
 	Pending map[uint8]PianoPending `json:"-"`
 }
 
-// Validate clamps Piano fields into valid ranges.
+// Validate clamps Piano fields into valid ranges. Per-track playback
+// state (current / queued pattern) lives on the runtime Cursor and is
+// validated by the project, not the device.
 func (p *Piano) Validate() {
-	p.Schedule.Validate(NumPatterns)
-
 	if p.EditingPatternIdx < 0 {
 		p.EditingPatternIdx = 0
 	} else if p.EditingPatternIdx > NumPatterns-1 {
