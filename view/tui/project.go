@@ -103,7 +103,7 @@ func projectRender(sp *system.Project, project *model.Project, ops save.SaveOps,
 	}
 
 	titleStyle := themeStyle(th, roleFG).Bold(true)
-	cursorStyle := themeStyle(th, roleCursor).Bold(true)
+	cursorStyle := themeStyle(th, roleCursor)
 	editPromptStyle := themeStyle(th, roleAccent).Bold(true)
 	mutedStyle := themeStyle(th, roleMuted)
 

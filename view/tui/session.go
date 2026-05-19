@@ -100,7 +100,7 @@ func sessionRender(project *model.Project, th *theme.Theme) string {
 	queuedStyle := themeStyle(th, roleWarning).Bold(true)
 	hasContentStyle := themeStyle(th, roleAccent)
 	emptyStyle := themeStyle(th, roleMuted)
-	cursorStyle := themeStyle(th, roleCursor).Bold(true)
+	cursorStyle := themeStyle(th, roleCursor)
 
 	masks := make([][]bool, 8)
 	for i := 0; i < 8; i++ {
