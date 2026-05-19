@@ -146,8 +146,7 @@ Overall composing stuff;
 
 Musical devices (track-assignable):
   - Drum — 16 lanes × 32 steps + velocity + length + per-pattern kit
-  - Piano — polyphonic notes with start/duration/pitch/velocity
-  - Metropolix — 8 stages with pitch/gate/probability/ratchets/slides/accumulators
+  - Looper — raw MIDI capture tape loop: record MIDI input, play it back, clear & re-record
   - Empty — placeholder for unconfigured tracks
 
 System UIs (project-level, focusable):

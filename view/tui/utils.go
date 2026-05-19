@@ -9,7 +9,7 @@ import (
 )
 
 // This file holds cross-domain TUI helpers. Per-domain helpers stay inside
-// their own files (drum.go, piano.go, metropolix.go, session.go, settings.go,
+// their own files (drum.go, looper.go, session.go, settings.go,
 // project.go, empty.go); the Bubbletea Model + top-level dispatcher is in
 // tui.go.
 //

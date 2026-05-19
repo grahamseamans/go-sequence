@@ -435,42 +435,22 @@ func settingsSetDeviceType(track *model.Track, kind model.DeviceKind) {
 	track.Type = kind
 	switch kind {
 	case model.DeviceNone:
-		track.Drum = nil
-		track.Piano = nil
-		track.Metropolix = nil
+		track.Device = nil
 	case model.DeviceDrum:
-		track.Piano = nil
-		track.Metropolix = nil
-		if track.Drum == nil {
-			track.Drum = &devices.Drum{}
+		if _, ok := track.Device.(*devices.Drum); !ok {
+			track.Device = &devices.Drum{}
 		}
-		track.Drum.Validate()
-	case model.DevicePiano:
-		track.Drum = nil
-		track.Metropolix = nil
-		if track.Piano == nil {
-			track.Piano = &devices.Piano{}
+		track.Device.(*devices.Drum).Validate()
+	case model.DeviceLooper:
+		if _, ok := track.Device.(*devices.Looper); !ok {
+			track.Device = &devices.Looper{}
 		}
-		track.Piano.Validate()
-	case model.DeviceMetropolix:
-		track.Drum = nil
-		track.Piano = nil
-		if track.Metropolix == nil {
-			track.Metropolix = &devices.Metropolix{}
-		}
-		track.Metropolix.Validate()
+		track.Device.(*devices.Looper).Validate()
 	}
 }
 
-var settingsDeviceKindCycle = []model.DeviceKind{
-	model.DeviceNone,
-	model.DeviceDrum,
-	model.DevicePiano,
-	model.DeviceMetropolix,
-}
-
 func settingsDeviceKindIndex(kind model.DeviceKind) int {
-	for i, k := range settingsDeviceKindCycle {
+	for i, k := range model.DeviceCycle {
 		if k == kind {
 			return i
 		}
@@ -479,19 +459,28 @@ func settingsDeviceKindIndex(kind model.DeviceKind) int {
 }
 
 func settingsDeviceKindFromIndex(idx int) model.DeviceKind {
-	if idx < 0 || idx >= len(settingsDeviceKindCycle) {
+	if idx < 0 || idx >= len(model.DeviceCycle) {
 		return model.DeviceNone
 	}
-	return settingsDeviceKindCycle[idx]
+	return model.DeviceCycle[idx]
 }
 
 func settingsDeviceTypeOptions() []string {
-	return []string{
-		sessionDeviceLabel(model.DeviceNone),
-		sessionDeviceLabel(model.DeviceDrum),
-		sessionDeviceLabel(model.DevicePiano),
-		sessionDeviceLabel(model.DeviceMetropolix),
+	out := make([]string, len(model.DeviceCycle))
+	for i, k := range model.DeviceCycle {
+		out[i] = model.DeviceLabel(k)
 	}
+	return out
+}
+
+func settingsNextDeviceKind(kind model.DeviceKind) model.DeviceKind {
+	i := settingsDeviceKindIndex(kind)
+	return model.DeviceCycle[(i+1)%len(model.DeviceCycle)]
+}
+
+func settingsPrevDeviceKind(kind model.DeviceKind) model.DeviceKind {
+	i := settingsDeviceKindIndex(kind)
+	return model.DeviceCycle[(i-1+len(model.DeviceCycle))%len(model.DeviceCycle)]
 }
 
 func settingsChannelOptions() []string {
@@ -532,16 +521,6 @@ func settingsKitIndex(options []string, current string) int {
 		}
 	}
 	return 0
-}
-
-func settingsNextDeviceKind(kind model.DeviceKind) model.DeviceKind {
-	i := settingsDeviceKindIndex(kind)
-	return settingsDeviceKindCycle[(i+1)%len(settingsDeviceKindCycle)]
-}
-
-func settingsPrevDeviceKind(kind model.DeviceKind) model.DeviceKind {
-	i := settingsDeviceKindIndex(kind)
-	return settingsDeviceKindCycle[(i-1+len(settingsDeviceKindCycle))%len(settingsDeviceKindCycle)]
 }
 
 // settingsNextKit returns the next kit name in devices.KitNames(), wrapping.

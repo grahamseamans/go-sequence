@@ -16,6 +16,7 @@ import (
 	"go-sequence/controller/devices/save"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // RunRoutine is the launchpad goroutine. Reads surf.PadEvents(), dispatches
@@ -55,16 +56,13 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		if track == nil {
 			return
 		}
-		track.Lock()
-		switch track.Type {
-		case model.DeviceDrum:
+track.Lock()
+		switch track.Device.(type) {
+		case *devices.Drum:
 			drumPad(track, project, out, ev.Row, ev.Col, ev.Down)
-		case model.DevicePiano:
-			pianoPad(track, project, out, ev.Row, ev.Col, ev.Down)
-		case model.DeviceMetropolix:
-			metropolixPad(track, project, out, ev.Row, ev.Col, ev.Down)
+		case *devices.Looper:
+			looperPad(track, project, out, ev.Row, ev.Col, ev.Down)
 		default:
-			// DeviceNone — no-op device still gets the event for symmetry.
 			emptyPad(project, out, ev.Row, ev.Col, ev.Down)
 		}
 		track.Unlock()
@@ -127,13 +125,11 @@ func RenderLEDs(project *model.Project, saveOps save.SaveOps) []LED {
 		if track == nil {
 			return nil
 		}
-		switch track.Type {
-		case model.DeviceDrum:
+		switch track.Device.(type) {
+		case *devices.Drum:
 			return drumLEDs(track, project)
-		case model.DevicePiano:
-			return pianoLEDs(track, project)
-		case model.DeviceMetropolix:
-			return metropolixLEDs(track, project)
+		case *devices.Looper:
+			return looperLEDs(track, project)
 		default:
 			return emptyLEDs(project)
 		}

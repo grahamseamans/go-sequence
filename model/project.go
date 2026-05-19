@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -12,11 +13,33 @@ import (
 type DeviceKind string
 
 const (
-	DeviceNone       DeviceKind = ""
-	DeviceDrum       DeviceKind = "Drum"
-	DevicePiano      DeviceKind = "Piano"
-	DeviceMetropolix DeviceKind = "Metropolix"
+	DeviceNone   DeviceKind = ""
+	DeviceDrum   DeviceKind = "Drum"
+	DeviceLooper DeviceKind = "Looper"
 )
+
+// DeviceLabels maps DeviceKind to a human-readable label.
+var DeviceLabels = map[DeviceKind]string{
+	DeviceNone:   "empty",
+	DeviceDrum:   "Drum",
+	DeviceLooper: "Looper",
+}
+
+// DeviceCycle is the ordered list of device types for cycling through in
+// settings views (t / T shortcuts).
+var DeviceCycle = []DeviceKind{
+	DeviceNone,
+	DeviceDrum,
+	DeviceLooper,
+}
+
+// DeviceLabel returns a human-readable label for a DeviceKind.
+func DeviceLabel(kind DeviceKind) string {
+	if l, ok := DeviceLabels[kind]; ok {
+		return l
+	}
+	return "empty"
+}
 
 // Project is the entire state of a go-sequence project. Persisted fields
 // carry JSON tags; UI / Playback / Compile are runtime-only (json:"-") and
@@ -29,8 +52,8 @@ type Project struct {
 	Compile  CompileState  `json:"-"`
 }
 
-// Track is one of the project's eight tracks. Exactly one of Drum/Piano/
-// Metropolix is non-nil when Type names a device; all three are nil when
+// Track is one of the project's eight tracks. Device carries the per-device
+// state as a concrete type (*devices.Drum, *devices.Looper) and is nil when
 // Type == DeviceNone. mu guards the track's spec fields against concurrent
 // reads (Compiler, View) and writes (input router).
 //
@@ -38,15 +61,59 @@ type Project struct {
 // downstream mixer the user is sending MIDI to, not in the sequencer.
 // To silence a track from the sequencer, stop the pattern instead.
 type Track struct {
-	Name       string              `json:"name"`
-	Channel    uint8               `json:"channel"`
-	PortName   string              `json:"portName,omitempty"`
-	Type       DeviceKind          `json:"type"`
-	Kit        string              `json:"kit,omitempty"`
-	mu         sync.RWMutex        `json:"-"`
-	Drum       *devices.Drum       `json:"drum,omitempty"`
-	Piano      *devices.Piano      `json:"piano,omitempty"`
-	Metropolix *devices.Metropolix `json:"metropolix,omitempty"`
+	Name     string       `json:"name"`
+	Channel  uint8        `json:"channel"`
+	PortName string       `json:"portName,omitempty"`
+	Type     DeviceKind   `json:"type"`
+	Kit      string       `json:"kit,omitempty"`
+	mu       sync.RWMutex `json:"-"`
+	Device   any          `json:"-"`
+}
+
+// trackJSON mirrors Track for JSON serialization. It carries a flat field
+// per device type so the on-disk format is the same as the old per-field
+// approach.
+type trackJSON struct {
+	Name     string           `json:"name"`
+	Channel  uint8            `json:"channel"`
+	PortName string           `json:"portName,omitempty"`
+	Type     DeviceKind       `json:"type"`
+	Kit      string           `json:"kit,omitempty"`
+	Drum     *devices.Drum    `json:"drum,omitempty"`
+	Looper   *devices.Looper  `json:"looper,omitempty"`
+}
+
+func (t *Track) MarshalJSON() ([]byte, error) {
+	j := trackJSON{
+		Name: t.Name, Channel: t.Channel,
+		PortName: t.PortName, Type: t.Type, Kit: t.Kit,
+	}
+	switch d := t.Device.(type) {
+	case *devices.Drum:
+		j.Drum = d
+	case *devices.Looper:
+		j.Looper = d
+	}
+	return json.Marshal(j)
+}
+
+func (t *Track) UnmarshalJSON(data []byte) error {
+	var j trackJSON
+	if err := json.Unmarshal(data, &j); err != nil {
+		return err
+	}
+	t.Name = j.Name
+	t.Channel = j.Channel
+	t.PortName = j.PortName
+	t.Type = j.Type
+	t.Kit = j.Kit
+	switch t.Type {
+	case DeviceDrum:
+		t.Device = j.Drum
+	case DeviceLooper:
+		t.Device = j.Looper
+	}
+	return nil
 }
 
 // Lock acquires the track's write lock. Used by the input router on mutations.
@@ -110,8 +177,7 @@ func (p *Project) ReplacePersisted(src *Project) {
 }
 
 // Validate clamps every field of the project into a known-good range and
-// enforces the "exactly one device pointer non-nil" invariant implied by
-// Track.Type. Call after Load.
+// enforces the "device matches type" invariant implied by Track.Type.
 func (p *Project) Validate() {
 	if p.Tempo <= 0 {
 		p.Tempo = 120
@@ -136,36 +202,48 @@ func (p *Project) Validate() {
 
 		switch t.Type {
 		case DeviceNone:
-			t.Drum = nil
-			t.Piano = nil
-			t.Metropolix = nil
+			t.Device = nil
 		case DeviceDrum:
-			if t.Drum == nil {
-				t.Drum = &devices.Drum{}
+			if _, ok := t.Device.(*devices.Drum); !ok {
+				t.Device = &devices.Drum{}
 			}
-			t.Piano = nil
-			t.Metropolix = nil
-			t.Drum.Validate()
-		case DevicePiano:
-			if t.Piano == nil {
-				t.Piano = &devices.Piano{}
+			t.Device.(*devices.Drum).Validate()
+		case DeviceLooper:
+			if _, ok := t.Device.(*devices.Looper); !ok {
+				t.Device = &devices.Looper{}
 			}
-			t.Drum = nil
-			t.Metropolix = nil
-			t.Piano.Validate()
-		case DeviceMetropolix:
-			if t.Metropolix == nil {
-				t.Metropolix = &devices.Metropolix{}
-			}
-			t.Drum = nil
-			t.Piano = nil
-			t.Metropolix.Validate()
+			t.Device.(*devices.Looper).Validate()
 		default:
-			// Unknown device kind → downgrade to DeviceNone and drop data.
 			t.Type = DeviceNone
-			t.Drum = nil
-			t.Piano = nil
-			t.Metropolix = nil
+			t.Device = nil
 		}
 	}
+}
+
+// PatternHasContent returns true if the named pattern on the track has any
+// user-entered content. Returns false when the track has no device.
+func PatternHasContent(track *Track, patternIdx int) bool {
+	if track == nil || patternIdx < 0 || patternIdx >= devices.NumPatterns {
+		return false
+	}
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d == nil || d.Patterns[patternIdx] == nil {
+			return false
+		}
+		for _, lane := range d.Patterns[patternIdx].Notes {
+			for _, step := range lane.Steps {
+				if step.Active {
+					return true
+				}
+			}
+		}
+		return false
+	case *devices.Looper:
+		if d == nil || d.Patterns[patternIdx] == nil {
+			return false
+		}
+		return len(d.Patterns[patternIdx].Events) > 0
+	}
+	return false
 }

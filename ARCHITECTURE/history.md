@@ -10,7 +10,7 @@ Status: live. First commit: `196e1bd` (refactor step 1, 2026-04-19).
 Current HEAD: `4a9a677` and beyond.
 
 Three layers, parallel paths per domain:
-- `model/` — state. Devices (Drum/Piano/Metropolix) and system widgets
+- `model/` — state. Devices (Drum/Looper) and system widgets
   (Session/Settings/Project) live here. UIState is a model field too —
   per DESIGN: "model owns all state."
 - `controller/` — free functions on state. No structs, no methods. The

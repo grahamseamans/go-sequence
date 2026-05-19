@@ -17,6 +17,7 @@ import (
 	"go-sequence/controller/devices/save"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 	"go-sequence/theme"
 )
 
@@ -133,13 +134,11 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 			return
 		}
 		track.Lock()
-		switch track.Type {
-		case model.DeviceDrum:
+		switch track.Device.(type) {
+		case *devices.Drum:
 			drumKey(track, project, out, key)
-		case model.DevicePiano:
-			pianoKey(track, project, out, key)
-		case model.DeviceMetropolix:
-			metropolixKey(track, project, out, key)
+		case *devices.Looper:
+			looperKey(track, project, out, key)
 		default:
 			emptyKey(project, out, key)
 		}
@@ -192,13 +191,11 @@ func Render(project *model.Project, saveOps save.SaveOps, th *theme.Theme) strin
 		if track == nil {
 			return ""
 		}
-		switch track.Type {
-		case model.DeviceDrum:
+		switch track.Device.(type) {
+		case *devices.Drum:
 			return drumRender(track, project, th)
-		case model.DevicePiano:
-			return pianoRender(track, project, th)
-		case model.DeviceMetropolix:
-			return metropolixRender(track, project, th)
+		case *devices.Looper:
+			return looperRender(track, project, th)
 		default:
 			return emptyRender(project, th)
 		}

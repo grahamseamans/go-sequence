@@ -243,15 +243,7 @@ func sessionTrackSchedule(project *model.Project, trackIdx int) (playing, queued
 }
 
 func sessionDeviceLabel(kind model.DeviceKind) string {
-	switch kind {
-	case model.DeviceDrum:
-		return "Drum"
-	case model.DevicePiano:
-		return "Piano"
-	case model.DeviceMetropolix:
-		return "Metropolix"
-	}
-	return "empty"
+	return model.DeviceLabel(kind)
 }
 
 // sessionRenderLaunchpadHelp renders the clip-launcher Launchpad reference.
@@ -312,49 +304,8 @@ func sessionContentMask(track *model.Track) []bool {
 		return nil
 	}
 	mask := make([]bool, devices.NumPatterns)
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum == nil {
-			return nil
-		}
-		for i, p := range track.Drum.Patterns {
-			if p == nil {
-				continue
-			}
-			for _, lane := range p.Notes {
-				for _, step := range lane.Steps {
-					if step.Active {
-						mask[i] = true
-						break
-					}
-				}
-				if mask[i] {
-					break
-				}
-			}
-		}
-	case model.DevicePiano:
-		if track.Piano == nil {
-			return nil
-		}
-		for i, p := range track.Piano.Patterns {
-			if p == nil {
-				continue
-			}
-			if len(p.Notes) > 0 {
-				mask[i] = true
-			}
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return nil
-		}
-		for i, p := range track.Metropolix.Patterns {
-			if p == nil {
-				continue
-			}
-			mask[i] = true
-		}
+	for i := 0; i < devices.NumPatterns; i++ {
+		mask[i] = model.PatternHasContent(track, i)
 	}
 	return mask
 }

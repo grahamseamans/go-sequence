@@ -6,8 +6,7 @@ import (
 	"time"
 
 	"go-sequence/controller/devices/drum"
-	"go-sequence/controller/devices/metropolix"
-	"go-sequence/controller/devices/piano"
+	"go-sequence/controller/devices/looper"
 	"go-sequence/debug"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -69,36 +68,26 @@ func compileSlot(project *model.Project, req model.CompileRequest) {
 	var cp devices.CompiledPattern
 	var machine *[2]atomic.Pointer[devices.CompiledPattern]
 
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum == nil {
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d == nil {
 			return
 		}
-		pat := track.Drum.Patterns[req.Pattern]
+		pat := d.Patterns[req.Pattern]
 		if pat == nil {
 			return
 		}
 		cp = drum.Compile(pat, devices.GetKit(track.Kit), seed)
 		machine = &pat.Machine
-	case model.DevicePiano:
-		if track.Piano == nil {
+	case *devices.Looper:
+		if d == nil {
 			return
 		}
-		pat := track.Piano.Patterns[req.Pattern]
+		pat := d.Patterns[req.Pattern]
 		if pat == nil {
 			return
 		}
-		cp = piano.Compile(pat, seed)
-		machine = &pat.Machine
-	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return
-		}
-		pat := track.Metropolix.Patterns[req.Pattern]
-		if pat == nil {
-			return
-		}
-		cp = metropolix.Compile(pat, seed)
+		cp = looper.Compile(pat, seed)
 		machine = &pat.Machine
 	default:
 		return

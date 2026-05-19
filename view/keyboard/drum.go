@@ -26,16 +26,13 @@ import (
 // the signature keeps the call site stable if we later want to, e.g.,
 // stamp the recorded step from live playback tick.
 func drumMIDI(track *model.Track, project *model.Project, trackIdx int, out midi.ToExternal, ev midi.Event) {
-	if track == nil || track.Drum == nil {
+	if track == nil {
 		return
 	}
-	// Only react to note-on with positive velocity. A note-on with
-	// velocity 0 is a note-off encoded in running status; ignore both.
-	if ev.Type != midi.NoteOn || ev.Velocity == 0 {
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
 		return
 	}
-
-	state := track.Drum
 
 	// Not recording: preview this note straight to the track's output.
 	// Send the hit MIDI note as-is (no kit translation) — the user is

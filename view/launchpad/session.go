@@ -3,7 +3,6 @@ package launchpad
 import (
 	"go-sequence/midi"
 	"go-sequence/model"
-	"go-sequence/model/devices"
 )
 
 // session-view colors. Bright green = currently-playing pattern; amber =
@@ -84,58 +83,8 @@ func sessionCellColor(track *model.Track, cursor model.Cursor, col int) LED {
 	if cursor.QueuedPattern == col {
 		return sessionQueued
 	}
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum != nil && sessionDrumPatternHasContent(track.Drum.Patterns[col]) {
-			return sessionHasContent
-		}
-	case model.DevicePiano:
-		if track.Piano != nil && sessionPianoPatternHasContent(track.Piano.Patterns[col]) {
-			return sessionHasContent
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix != nil && sessionMetropolixPatternHasContent(track.Metropolix.Patterns[col]) {
-			return sessionHasContent
-		}
+	if model.PatternHasContent(track, col) {
+		return sessionHasContent
 	}
 	return sessionEmpty
-}
-
-// sessionDrumPatternHasContent reports whether any step of any lane in the
-// pattern is Active. A nil pattern counts as empty.
-func sessionDrumPatternHasContent(pat *devices.DrumPattern) bool {
-	if pat == nil {
-		return false
-	}
-	for lane := range pat.Notes {
-		for step := range pat.Notes[lane].Steps {
-			if pat.Notes[lane].Steps[step].Active {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// sessionPianoPatternHasContent reports whether the piano pattern has any
-// notes. A nil pattern counts as empty.
-func sessionPianoPatternHasContent(pat *devices.PianoPattern) bool {
-	if pat == nil {
-		return false
-	}
-	return len(pat.Notes) > 0
-}
-
-// sessionMetropolixPatternHasContent reports whether any stage in the
-// pattern has Gate=true. A nil pattern counts as empty.
-func sessionMetropolixPatternHasContent(pat *devices.MetropolixPattern) bool {
-	if pat == nil {
-		return false
-	}
-	for i := range pat.Stages {
-		if pat.Stages[i].Gate {
-			return true
-		}
-	}
-	return false
 }

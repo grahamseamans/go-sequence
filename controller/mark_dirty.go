@@ -29,22 +29,17 @@ func MarkTrackDirty(project *model.Project, trackIdx int) {
 		return
 	}
 	var patternIdx int
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum == nil {
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d == nil {
 			return
 		}
-		patternIdx = track.Drum.EditingPatternIdx
-	case model.DevicePiano:
-		if track.Piano == nil {
+		patternIdx = d.EditingPatternIdx
+	case *devices.Looper:
+		if d == nil {
 			return
 		}
-		patternIdx = track.Piano.EditingPatternIdx
-	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return
-		}
-		patternIdx = track.Metropolix.EditingPatternIdx
+		patternIdx = d.EditingPatternIdx
 	default:
 		return
 	}
@@ -88,21 +83,16 @@ func MarkPatternDirty(project *model.Project, trackIdx, patternIdx int) {
 	if track == nil {
 		return
 	}
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum != nil && track.Drum.Patterns[patternIdx] != nil {
-			track.Drum.Patterns[patternIdx].Machine[0].Store(nil)
-			track.Drum.Patterns[patternIdx].Machine[1].Store(nil)
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d != nil && d.Patterns[patternIdx] != nil {
+			d.Patterns[patternIdx].Machine[0].Store(nil)
+			d.Patterns[patternIdx].Machine[1].Store(nil)
 		}
-	case model.DevicePiano:
-		if track.Piano != nil && track.Piano.Patterns[patternIdx] != nil {
-			track.Piano.Patterns[patternIdx].Machine[0].Store(nil)
-			track.Piano.Patterns[patternIdx].Machine[1].Store(nil)
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix != nil && track.Metropolix.Patterns[patternIdx] != nil {
-			track.Metropolix.Patterns[patternIdx].Machine[0].Store(nil)
-			track.Metropolix.Patterns[patternIdx].Machine[1].Store(nil)
+	case *devices.Looper:
+		if d != nil && d.Patterns[patternIdx] != nil {
+			d.Patterns[patternIdx].Machine[0].Store(nil)
+			d.Patterns[patternIdx].Machine[1].Store(nil)
 		}
 	default:
 		return

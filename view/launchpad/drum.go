@@ -52,10 +52,13 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 	if !down {
 		return
 	}
-	if track == nil || track.Drum == nil {
+	if track == nil {
 		return
 	}
-	state := track.Drum
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
+		return
+	}
 	pat := state.Patterns[state.EditingPatternIdx]
 	if pat == nil {
 		return
@@ -148,10 +151,13 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 //	                     command color. Preview (3,4) and Record (3,5)
 //	                     light bright green/red when armed.
 func drumLEDs(track *model.Track, project *model.Project) []LED {
-	if track == nil || track.Drum == nil {
+	if track == nil {
 		return nil
 	}
-	state := track.Drum
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
+		return nil
+	}
 	pat := state.Patterns[state.EditingPatternIdx]
 	if pat == nil {
 		return nil
@@ -242,7 +248,8 @@ func drumLaneHasAnyHit(lane *devices.NoteLane) bool {
 // editing pattern, and a playing-but-not-editing pattern naturally has no
 // visible playhead because the row shows a different lane set of steps.
 func drumPlayingStep(track *model.Track, project *model.Project) int {
-	if track.Drum == nil {
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
 		return -1
 	}
 	// Resolve the track's index in project.Tracks; prefer the UI focus as
@@ -256,10 +263,10 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	}
 	cursor := project.Playback.Cursors[trackIdx]
 	playingIdx := cursor.CurrentPattern
-	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
+	if playingIdx < 0 || playingIdx >= len(state.Patterns) {
 		return -1
 	}
-	playingPat := track.Drum.Patterns[playingIdx]
+	playingPat := state.Patterns[playingIdx]
 	if playingPat == nil {
 		return -1
 	}
@@ -278,7 +285,7 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	// Editing pattern may differ from playing pattern; the highlight only
 	// makes sense on the playing pattern's step grid. If we're editing a
 	// different pattern, hide the playhead.
-	if track.Drum.EditingPatternIdx != playingIdx {
+	if state.EditingPatternIdx != playingIdx {
 		return -1
 	}
 	if stepIdx < 0 || stepIdx >= 32 {

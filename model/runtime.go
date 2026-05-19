@@ -39,7 +39,7 @@ type Cursor struct {
 type FocusKind int
 
 const (
-	FocusTrack FocusKind = iota // a per-track device view (Drum/Piano/Metropolix)
+	FocusTrack FocusKind = iota // a per-track device view (Drum/Looper)
 	FocusSession
 	FocusSettings
 	FocusProject // was "Save" — project browser (load/save/rename/delete)

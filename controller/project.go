@@ -133,7 +133,7 @@ func NewProject() *model.Project {
 	p := model.New()
 	p.Tracks[0].Type = model.DeviceDrum
 	p.Tracks[0].Kit = devices.DefaultKit
-	p.Tracks[0].Drum = &devices.Drum{}
+	p.Tracks[0].Device = &devices.Drum{}
 	p.Validate()
 	return p
 }

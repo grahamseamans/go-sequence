@@ -46,10 +46,13 @@ import (
 //	per-lane length       the new model has pattern-global length only.
 //	                      [ / ] now resize the pattern, not a lane.
 func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, key string) {
-	if track == nil || track.Drum == nil {
+	if track == nil {
 		return
 	}
-	state := track.Drum
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
+		return
+	}
 	pat := state.Patterns[state.EditingPatternIdx]
 	if pat == nil {
 		return
@@ -158,10 +161,13 @@ func drumKey(track *model.Track, project *model.Project, out midi.ToExternal, ke
 //	        — empty step: '·' / '○' (cursor).
 //	footer: key-help summary.
 func drumRender(track *model.Track, project *model.Project, th *theme.Theme) string {
-	if track == nil || track.Drum == nil {
+	if track == nil {
 		return ""
 	}
-	state := track.Drum
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
+		return ""
+	}
 	pat := state.Patterns[state.EditingPatternIdx]
 	if pat == nil {
 		return ""
@@ -380,7 +386,8 @@ func drumPatternHasAnyStep(pat *devices.DrumPattern) bool {
 // track, or -1 when unavailable (not playing, uncompiled pattern, or the
 // edit view is on a different pattern than the one playing).
 func drumPlayingStep(track *model.Track, project *model.Project) int {
-	if track.Drum == nil {
+	state, ok := track.Device.(*devices.Drum)
+	if !ok || state == nil {
 		return -1
 	}
 	trackIdx := -1
@@ -395,15 +402,15 @@ func drumPlayingStep(track *model.Track, project *model.Project) int {
 	}
 	cursor := project.Playback.Cursors[trackIdx]
 	playingIdx := cursor.CurrentPattern
-	if playingIdx < 0 || playingIdx >= len(track.Drum.Patterns) {
+	if playingIdx < 0 || playingIdx >= len(state.Patterns) {
 		return -1
 	}
-	if track.Drum.EditingPatternIdx != playingIdx {
+	if state.EditingPatternIdx != playingIdx {
 		// Playhead only makes sense when the user is editing the same
 		// pattern that's playing. Different patterns => no playhead drawn.
 		return -1
 	}
-	playingPat := track.Drum.Patterns[playingIdx]
+	playingPat := state.Patterns[playingIdx]
 	if playingPat == nil {
 		return -1
 	}

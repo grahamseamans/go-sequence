@@ -17,6 +17,7 @@ import (
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
+	"go-sequence/model/devices"
 )
 
 // RunRoutine is the keyboard goroutine entry point. Subscribes to the
@@ -105,13 +106,11 @@ func HandleMIDI(project *model.Project, out midi.ToExternal, trackIdx int, ev mi
 		return
 	}
 	track.Lock()
-	switch track.Type {
-	case model.DeviceDrum:
+	switch track.Device.(type) {
+	case *devices.Drum:
 		drumMIDI(track, project, trackIdx, out, ev)
-	case model.DevicePiano:
-		pianoMIDI(track, project, trackIdx, out, ev)
-	case model.DeviceMetropolix:
-		metropolixMIDI(track, project, trackIdx, out, ev)
+	case *devices.Looper:
+		looperMIDI(track, project, trackIdx, out, ev)
 	}
 	track.Unlock()
 	controller.MarkTrackDirty(project, trackIdx)

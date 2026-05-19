@@ -164,39 +164,27 @@ func resolveCurrent(project *model.Project, track *model.Track, trackIdx int) (i
 	}
 	idx := cursor.CurrentPattern
 
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum == nil {
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d == nil {
 			return 0, nil
 		}
-		if idx < 0 || idx >= len(track.Drum.Patterns) {
+		if idx < 0 || idx >= len(d.Patterns) {
 			return 0, nil
 		}
-		pat := track.Drum.Patterns[idx]
+		pat := d.Patterns[idx]
 		if pat == nil {
 			return idx, nil
 		}
 		return idx, pat.Machine[slot].Load()
-	case model.DevicePiano:
-		if track.Piano == nil {
+	case *devices.Looper:
+		if d == nil {
 			return 0, nil
 		}
-		if idx < 0 || idx >= len(track.Piano.Patterns) {
+		if idx < 0 || idx >= len(d.Patterns) {
 			return 0, nil
 		}
-		pat := track.Piano.Patterns[idx]
-		if pat == nil {
-			return idx, nil
-		}
-		return idx, pat.Machine[slot].Load()
-	case model.DeviceMetropolix:
-		if track.Metropolix == nil {
-			return 0, nil
-		}
-		if idx < 0 || idx >= len(track.Metropolix.Patterns) {
-			return 0, nil
-		}
-		pat := track.Metropolix.Patterns[idx]
+		pat := d.Patterns[idx]
 		if pat == nil {
 			return idx, nil
 		}
@@ -264,18 +252,14 @@ func trashSlot(track *model.Track, patternIdx, slot int) {
 	if slot < 0 || slot > 1 || patternIdx < 0 || patternIdx >= devices.NumPatterns {
 		return
 	}
-	switch track.Type {
-	case model.DeviceDrum:
-		if track.Drum != nil && track.Drum.Patterns[patternIdx] != nil {
-			track.Drum.Patterns[patternIdx].Machine[slot].Store(nil)
+	switch d := track.Device.(type) {
+	case *devices.Drum:
+		if d != nil && d.Patterns[patternIdx] != nil {
+			d.Patterns[patternIdx].Machine[slot].Store(nil)
 		}
-	case model.DevicePiano:
-		if track.Piano != nil && track.Piano.Patterns[patternIdx] != nil {
-			track.Piano.Patterns[patternIdx].Machine[slot].Store(nil)
-		}
-	case model.DeviceMetropolix:
-		if track.Metropolix != nil && track.Metropolix.Patterns[patternIdx] != nil {
-			track.Metropolix.Patterns[patternIdx].Machine[slot].Store(nil)
+	case *devices.Looper:
+		if d != nil && d.Patterns[patternIdx] != nil {
+			d.Patterns[patternIdx].Machine[slot].Store(nil)
 		}
 	}
 }

@@ -4,7 +4,7 @@ MIDI sequencer/arranger. Not a DAW. A MIDI brain.
 
 ## Status
 
-Working: Drum sequencer (16 sounds, 32 steps, variable length), piano roll (note editing, playback), clip launcher, Launchpad X with LED feedback. Track-based architecture with per-track MIDI channels.
+Working: Drum sequencer (16 sounds, 32 steps, variable length), looper (record/playback MIDI input), clip launcher, Launchpad X with LED feedback. Track-based architecture with per-track MIDI channels.
 
 ## Feature Checklist
 
@@ -41,27 +41,13 @@ Working: Drum sequencer (16 sounds, 32 steps, variable length), piano roll (note
 - [ ] Nudge notes forward/backward (data structure exists)
 - [ ] Copy/paste pattern
 
-### Piano Roll Device
-The piano roll is for **editing notes you play in** via MIDI keyboard - not for composing from scratch. Quick fixes: nudge timing, fix wrong notes, adjust velocity/length.
-
-- [x] Playback note events with timing and note-off
-- [x] Viewport-based rendering (center follows selection)
-- [x] Select notes with `hjkl`, move with `yuio` (no mode toggle)
-- [x] Note length with `n`/`m`
-- [x] Add/delete notes (`space`/`x`)
-- [x] Pattern length (`[`/`]`)
-- [x] Horizontal zoom (8 levels, `q`/`w`)
-- [x] Vertical zoom (smushed/spread, `a`/`s`)
-- [x] Edit sensitivity (coarse/fine, `d`/`f` horiz, `e`/`r` vert)
-- [x] Overlap visualization (overlapping notes shown with `═`)
-- [ ] **Record from MIDI keyboard** ← priority
-- [ ] Quantize
-
-### Metropolix Device
-- [ ] Stages with pitch, gate, probability
-- [ ] Ratchets
-- [ ] Slides
-- [ ] Accumulators
+### Looper Device
+- [x] Record MIDI input to pattern (tick-relative event capture)
+- [x] Loop playback of recorded events
+- [x] Per-pattern length control
+- [x] 16 patterns per track
+- [ ] Overdub
+- [ ] Undo
 
 ### Transport
 - [x] Play/stop
@@ -106,30 +92,11 @@ The piano roll is for **editing notes you play in** via MIDI keyboard - not for 
 - Record toggle - write steps when tapping track pads during playback
 - Clear track/pattern, length +/-
 
-### Piano Roll
-**Select notes**
-- `hjkl` - select notes (vim movement)
-
-**Move selected note**
-- `yuio` - move note (vim movement, one row up)
-- `n`/`m` - shorter/longer
-
-**Add/delete**
-- `space` - add note at view center
-- `x` - delete selected note
-
-**View**
-- `q`/`w` - zoom out/in
-- `a`/`s` - smushed/spread (vertical)
-
-**Grid sensitivity**
-- `d`/`f` - horizontal coarse/fine
-- `e`/`r` - vertical coarse/fine
-
-**Pattern**
-- `<`/`>` - previous/next pattern (editing)
-- `[`/`]` - pattern length -/+
-- `c` - clear pattern
+### Looper Device
+- `r` - toggle record (wipes previous recording on arm)
+- `c` - clear recorded events
+- `<` / `>` - previous/next pattern
+- `[` / `]` - shorten/lengthen loop
 
 ### Session
 - `h`/`l` - cursor left/right (tracks)
