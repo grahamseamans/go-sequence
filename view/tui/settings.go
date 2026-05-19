@@ -213,7 +213,7 @@ func settingsRender(project *model.Project, th *theme.Theme) string {
 
 	titleStyle := themeStyle(th, roleFG).Bold(true)
 	headerStyle := themeStyle(th, roleMuted)
-	cursorStyle := themeStyle(th, roleCursor).Bold(true)
+	cursorStyle := themeStyle(th, roleCursor)
 	mutedStyle := themeStyle(th, roleMuted)
 
 	var b strings.Builder
