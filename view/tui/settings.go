@@ -221,8 +221,9 @@ func settingsRender(project *model.Project, th *theme.Theme) string {
 	b.WriteString("\n\n")
 
 	// Column headers.
-	b.WriteString(headerStyle.Render(fmt.Sprintf("  %-4s  %-12s  %-7s  %-20s  %s\n",
+	b.WriteString(headerStyle.Render(fmt.Sprintf("  %-4s  %-12s  %-7s  %-20s  %s",
 		"Trk", "Type", "Channel", "Output", "Kit")))
+	b.WriteString("\n")
 
 	for row := 0; row < 8; row++ {
 		track := project.Tracks[row]
