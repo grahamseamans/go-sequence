@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"go-sequence/controller"
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -62,17 +63,13 @@ func sessionKey(project *model.Project, out midi.ToExternal, key string) {
 	}
 }
 
-// sessionLaunchCursor queues the pattern at the session cursor on the
-// cursor's track. Mirrors view/launchpad/session.go::sessionPad: writes
-// QueuedPattern on the track's playback cursor; the engine swaps it in
-// at the next pattern boundary.
+// sessionLaunchCursor queues (or un-queues) the pattern at the session cursor
+// on the cursor's track, via the same controller.ToggleQueue the launchpad
+// session grid uses — so the two surfaces stay in lockstep (toggle semantics,
+// locking, and dirty-marking all live in one place).
 func sessionLaunchCursor(project *model.Project) {
 	ses := &project.UI.SystemSession
-	track := project.Tracks[ses.CursorTrack]
-	if track == nil || track.Type == model.DeviceNone {
-		return
-	}
-	project.Playback.Cursors[ses.CursorTrack].QueuedPattern = ses.CursorPattern
+	controller.ToggleQueue(project, ses.CursorTrack, ses.CursorPattern)
 }
 
 // sessionRender returns the TUI view for the session (clip launcher) view.

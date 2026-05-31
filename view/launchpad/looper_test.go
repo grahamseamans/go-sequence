@@ -175,8 +175,12 @@ func TestLooperPad_RecordingStampsTick(t *testing.T) {
 
 	gridPress(p, mock, 0, 0, 100)
 
-	if len(mock.Sends) != 0 {
-		t.Errorf("expected no preview send while recording, got %d", len(mock.Sends))
+	// Monitor-while-armed: the live note is sent through AND recorded.
+	if len(mock.Sends) != 1 {
+		t.Errorf("expected monitor send while recording, got %d", len(mock.Sends))
+	}
+	if len(mock.Sends) == 1 && (mock.Sends[0].Event.Note != 60 || mock.Sends[0].Event.Type != midi.NoteOn) {
+		t.Errorf("expected monitored NoteOn note 60, got %+v", mock.Sends[0].Event)
 	}
 	if len(pat.Events) != 1 {
 		t.Fatalf("expected 1 recorded event, got %d", len(pat.Events))

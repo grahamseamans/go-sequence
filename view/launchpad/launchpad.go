@@ -71,26 +71,18 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		}
 
 	case model.FocusSession:
-		// Session mutates the track cursor's QueuedPattern on
-		// project.Tracks[ev.Row]. Lock THAT track (not the currently-
-		// focused track). The "dirty" pattern is the queued column itself
-		// — mark it so its Machine slots are ready by the time playback
-		// wraps into it.
-		if ev.Row < 0 || ev.Row >= 8 {
+		// Top row of round buttons (Row 8) are scene triggers: queue pattern-
+		// column ev.Col on ALL tracks at once. Press-only.
+		if ev.Row == 8 {
+			if ev.Down {
+				controller.QueueScene(project, ev.Col)
+			}
 			return
 		}
-		tgt := project.Tracks[ev.Row]
-		if tgt != nil {
-			tgt.Lock()
-		}
+		// 8x8 grid: queue/un-queue a pattern on the row's track. The toggle,
+		// the per-track lock, and the dirty-mark all live in
+		// controller.ToggleQueue (via sessionPad), shared with the TUI.
 		sessionPad(project, out, ev.Row, ev.Col, ev.Down)
-		if tgt != nil {
-			tgt.Unlock()
-		}
-		if ev.Down {
-			// ev.Col is the queued pattern index; see sessionPad.
-			controller.MarkPatternDirty(project, ev.Row, ev.Col)
-		}
 
 	case model.FocusSettings:
 		// Settings edits fields on Tracks[Focus.Track]. Lock that track

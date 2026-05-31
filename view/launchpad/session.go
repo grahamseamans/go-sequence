@@ -1,6 +1,7 @@
 package launchpad
 
 import (
+	"go-sequence/controller"
 	"go-sequence/midi"
 	"go-sequence/model"
 )
@@ -13,32 +14,20 @@ var (
 	sessionQueued     = LED{R: 255, G: 160, B: 0}
 	sessionHasContent = LED{R: 30, G: 30, B: 30}
 	sessionEmpty      = LED{R: 0, G: 0, B: 0}
+	// sessionSceneDim lights the top-row scene-trigger buttons so they read
+	// as "available" — a dim white, reusing the has-content brightness.
+	sessionSceneDim = LED{R: 30, G: 30, B: 30}
 )
 
-// sessionPad queues a pattern on a track via the 8x8 session grid.
-//
-// Layout:
-//
-//	row in [0,7] is the track index (row 0 = track 0, top of the grid).
-//	col in [0,7] is the pattern index on that track.
-//
-// Writes QueuedPattern on the track's cursor; the playback engine
-// promotes it to CurrentPattern at the next pattern boundary.
+// sessionPad queues (or un-queues) a pattern on a track via the 8x8 session
+// grid. row in [0,7] is the track; col in [0,7] is the pattern slot. The
+// queue/un-queue toggle + locking + dirty-marking live in
+// controller.ToggleQueue, shared with the TUI session view.
 func sessionPad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
-	if row < 0 || row >= 8 || col < 0 || col >= 8 {
-		return
-	}
-	if project == nil {
-		return
-	}
-	track := project.Tracks[row]
-	if track == nil || track.Type == model.DeviceNone {
-		return
-	}
-	project.Playback.Cursors[row].QueuedPattern = col
+	controller.ToggleQueue(project, row, col)
 }
 
 // sessionLEDs renders the 8x8 LED frame for the session view.
@@ -69,6 +58,12 @@ func sessionLEDs(project *model.Project) []LED {
 			c := sessionCellColor(track, cursor, col)
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
+	}
+	// Top-row scene-trigger buttons (Row 8, cols 0-7). Emitted every frame —
+	// SetLEDs rewrites the whole frame, so anything not emitted keeps its
+	// stale color. Dim white = "scene available."
+	for col := 0; col < 8; col++ {
+		leds = append(leds, LED{Row: 8, Col: col, R: sessionSceneDim.R, G: sessionSceneDim.G, B: sessionSceneDim.B})
 	}
 	return leds
 }

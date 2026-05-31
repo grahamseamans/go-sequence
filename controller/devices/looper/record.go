@@ -11,13 +11,11 @@ import (
 // shared by every input source that feeds a looper: the launchpad grid
 // keyboard and the external-MIDI-keyboard view.
 //
-// Two modes:
-//
-//  1. Not recording and not overdubbing: preview. Send the event straight
-//     through to the track's output so the user hears what they play.
-//  2. Recording OR overdubbing: capture the event with a tick offset relative
-//     to the current pattern position. Both NoteOn and NoteOff are captured so
-//     playback reproduces the exact performance.
+// The live note is ALWAYS sent to output, so you monitor your own playing
+// through the track's synth (DESIGN/looper.md: "you monitor dry while armed").
+// On top of that, when Recording || Overdub the event is also captured with a
+// tick offset relative to the current pattern position. Both NoteOn and
+// NoteOff are captured so playback reproduces the exact performance.
 //
 // The Record-vs-Overdub clear-on-arm difference is handled by the pad handler
 // (Record arms with a wiped loop, Overdub arms keeping events), so this one
@@ -35,15 +33,18 @@ func RecordOrPreview(track *model.Track, project *model.Project, trackIdx int, o
 		return
 	}
 
-	// Not capturing — preview straight through.
+	// Always monitor: send the live note through so the user hears their own
+	// playing, whether previewing or recording over an existing loop.
+	if err := out.Send(track.PortName, track.Channel, ev); err != nil {
+		debug.Log("looper", "monitor send to %q ch%d: %v", track.PortName, track.Channel, err)
+	}
+
+	// Not capturing — monitor only.
 	if !(d.Recording || d.Overdub) {
-		if err := out.Send(track.PortName, track.Channel, ev); err != nil {
-			debug.Log("looper", "preview send to %q ch%d: %v", track.PortName, track.Channel, err)
-		}
 		return
 	}
 
-	// Recording or overdubbing — stamp with pattern-relative tick.
+	// Recording or overdubbing — also capture, stamped with pattern-relative tick.
 	cursor := project.Playback.Cursors[trackIdx]
 	globalTick := project.Playback.Tick.Load()
 	pos := globalTick - cursor.T0Tick

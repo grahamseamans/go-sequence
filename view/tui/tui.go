@@ -153,8 +153,9 @@ func HandleKey(project *model.Project, out midi.ToExternal, lc midi.OutputLifecy
 		controller.MarkTrackDirty(project, idx)
 
 	case model.FocusSession:
-		// No state change possible today — no dirty-mark. Dispatched for
-		// symmetry.
+		// Queuing goes through controller.ToggleQueue, which self-locks and
+		// marks the pattern dirty — so no lock/dirty bookkeeping is needed
+		// here (cursor movement keys mutate only UI state).
 		sessionKey(project, out, key)
 
 	case model.FocusSettings:
