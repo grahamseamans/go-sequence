@@ -9,9 +9,12 @@ import (
 	"go-sequence/model/devices"
 )
 
-// newTestSessionProject returns a project focused on the session view with
-// every track carrying a drum device (so none is DeviceNone), except track 7
-// which is intentionally left as DeviceNone to test that scenes skip it.
+// Session grid orientation: column = instrument/track, row = pattern with
+// pattern 0 on the TOP (physical row 7). So a press at physical row r, col c
+// targets track c, pattern (7 - r).
+
+// newTestSessionProject gives tracks 0..6 a drum device and leaves track 7 as
+// DeviceNone, to check that scene/queue helpers skip device-less tracks.
 func newTestSessionProject() *model.Project {
 	p := model.New()
 	for i := 0; i < 7; i++ {
@@ -22,10 +25,20 @@ func newTestSessionProject() *model.Project {
 		track.Channel = uint8(i)
 		track.Device = &devices.Drum{EditingPatternIdx: 0}
 	}
-	// Track 7 stays DeviceNone (no device). model.New() already initializes
-	// every cursor to QueuedPattern = -1.
+	// Track 7 stays DeviceNone. model.New() initializes every cursor to
+	// QueuedPattern = -1.
 	p.Validate()
 	p.UI.Focus = model.FocusTarget{Kind: model.FocusSession}
+	return p
+}
+
+// allDeviceSessionProject gives all 8 tracks a device, for orientation tests
+// that need every corner of the grid to register.
+func allDeviceSessionProject() *model.Project {
+	p := newTestSessionProject()
+	p.Tracks[7].Type = model.DeviceDrum
+	p.Tracks[7].Device = &devices.Drum{EditingPatternIdx: 0}
+	p.Validate()
 	return p
 }
 
@@ -33,15 +46,14 @@ func TestSessionPad_UnqueueToggle(t *testing.T) {
 	p := newTestSessionProject()
 	mock := &midi.MockToExternal{}
 
-	// Physical row 7 is the TOP row = track 0 (the grid is flipped so track 0
-	// sits on top). Tap an unqueued slot -> queues it.
-	sessionPad(p, mock, 7, 3, true)
+	// Track 0 (col 0), pattern 3 -> physical row 7-3 = 4. Tap to queue.
+	sessionPad(p, mock, 4, 0, true)
 	if p.Playback.Cursors[0].QueuedPattern != 3 {
 		t.Fatalf("expected QueuedPattern 3 after first tap, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
 
-	// Tap the same (now-queued) slot again -> cancels the queue.
-	sessionPad(p, mock, 7, 3, true)
+	// Tap the same (now-queued) cell again -> cancels the queue.
+	sessionPad(p, mock, 4, 0, true)
 	if p.Playback.Cursors[0].QueuedPattern != -1 {
 		t.Fatalf("expected QueuedPattern -1 after un-queue, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
@@ -51,52 +63,64 @@ func TestSessionPad_QueueDifferentReplaces(t *testing.T) {
 	p := newTestSessionProject()
 	mock := &midi.MockToExternal{}
 
-	sessionPad(p, mock, 7, 2, true) // row 7 = track 0
+	sessionPad(p, mock, 5, 0, true) // track 0, pattern 2
 	if p.Playback.Cursors[0].QueuedPattern != 2 {
 		t.Fatalf("expected QueuedPattern 2, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
 
-	sessionPad(p, mock, 7, 5, true)
+	sessionPad(p, mock, 2, 0, true) // track 0, pattern 5
 	if p.Playback.Cursors[0].QueuedPattern != 5 {
-		t.Fatalf("expected QueuedPattern 5 after queuing a different slot, got %d", p.Playback.Cursors[0].QueuedPattern)
+		t.Fatalf("expected QueuedPattern 5 after queuing a different pattern, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
 }
 
-func TestSessionPad_RowFlip_Track0OnTopRow(t *testing.T) {
-	p := newTestSessionProject()
-	mock := &midi.MockToExternal{}
-
-	// Top row (physical 7) must reach track 0.
-	sessionPad(p, mock, 7, 1, true)
-	if p.Playback.Cursors[0].QueuedPattern != 1 {
-		t.Errorf("top row (7) should queue track 0, got Cursors[0]=%d", p.Playback.Cursors[0].QueuedPattern)
+// TestSessionPad_Orientation locks the layout the user specified: top-left is
+// instrument 1 / pattern 1, bottom-right is instrument 8 / pattern 8.
+func TestSessionPad_Orientation(t *testing.T) {
+	cases := []struct {
+		name               string
+		row, col           int
+		wantTrack, wantPat int
+	}{
+		{"top-left = instr1/pat1", 7, 0, 0, 0},
+		{"bottom-left = instr1/pat8", 0, 0, 0, 7},
+		{"top-right = instr8/pat1", 7, 7, 7, 0},
+		{"bottom-right = instr8/pat8", 0, 7, 7, 7},
 	}
-	// Bottom row (physical 0) maps to track 7 (no device here) -> untouched.
-	sessionPad(p, mock, 0, 1, true)
-	if p.Playback.Cursors[7].QueuedPattern != -1 {
-		t.Errorf("bottom row maps to track 7 (no device), should stay -1, got %d", p.Playback.Cursors[7].QueuedPattern)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := allDeviceSessionProject()
+			mock := &midi.MockToExternal{}
+			sessionPad(p, mock, c.row, c.col, true)
+			if got := p.Playback.Cursors[c.wantTrack].QueuedPattern; got != c.wantPat {
+				t.Errorf("press (row=%d,col=%d): want track %d pattern %d, got Cursors[%d]=%d",
+					c.row, c.col, c.wantTrack, c.wantPat, c.wantTrack, got)
+			}
+		})
 	}
 }
 
-func TestSessionLEDs_Track0RendersOnTopRow(t *testing.T) {
+func TestSessionLEDs_Orientation(t *testing.T) {
 	p := newTestSessionProject()
-	p.Playback.Cursors[0].CurrentPattern = 0 // track 0 has a playing cell
+	p.Playback.Cursors[0].CurrentPattern = 0 // instrument 1, pattern 1 playing
+
 	leds := sessionLEDs(p)
 
-	// Track 0's playing cell must land on physical row 7 (top), not row 0.
-	top := findLEDMsg(leds, 7, 0, t)
-	if !colorEqual(top, sessionPlaying) {
-		t.Errorf("track 0 playing cell should be on top row (7), got %+v", top)
+	// Instrument 1 / pattern 1 must light the TOP-LEFT cell: physical row 7,
+	// col 0.
+	cell := findLEDMsg(leds, 7, 0, t)
+	if !colorEqual(cell, sessionPlaying) {
+		t.Errorf("instr1/pat1 playing cell should be top-left (row 7, col 0), got %+v", cell)
 	}
 }
 
-func TestSessionScene_QueuesColumnOnAllDeviceTracks(t *testing.T) {
+func TestSessionScene_QueuesPatternRowOnAllDeviceTracks(t *testing.T) {
 	p := newTestSessionProject()
 	mock := &midi.MockToExternal{}
 	var saveOps save.SaveOps
 
-	// Top-row scene trigger: Row 8, Col 3, press.
-	HandlePad(p, mock, saveOps, PadEvent{Row: 8, Col: 3, Down: true})
+	// Right-column "play all" button on physical row 4 -> pattern 3.
+	HandlePad(p, mock, saveOps, PadEvent{Row: 4, Col: 8, Down: true})
 
 	for i := 0; i < 7; i++ {
 		if p.Playback.Cursors[i].QueuedPattern != 3 {
@@ -105,7 +129,7 @@ func TestSessionScene_QueuesColumnOnAllDeviceTracks(t *testing.T) {
 	}
 	// Track 7 has no device — must be untouched.
 	if p.Playback.Cursors[7].QueuedPattern != -1 {
-		t.Errorf("track 7 (no device): expected QueuedPattern untouched (-1), got %d", p.Playback.Cursors[7].QueuedPattern)
+		t.Errorf("track 7 (no device): expected untouched (-1), got %d", p.Playback.Cursors[7].QueuedPattern)
 	}
 }
 
@@ -115,7 +139,7 @@ func TestSessionScene_PressOnly(t *testing.T) {
 	var saveOps save.SaveOps
 
 	// Release (Down=false) must not queue anything.
-	HandlePad(p, mock, saveOps, PadEvent{Row: 8, Col: 3, Down: false})
+	HandlePad(p, mock, saveOps, PadEvent{Row: 4, Col: 8, Down: false})
 	for i := 0; i < 8; i++ {
 		if p.Playback.Cursors[i].QueuedPattern != -1 {
 			t.Errorf("track %d: scene release must not queue, got %d", i, p.Playback.Cursors[i].QueuedPattern)
@@ -123,15 +147,15 @@ func TestSessionScene_PressOnly(t *testing.T) {
 	}
 }
 
-func TestSessionLEDs_EmitsSceneTopRow(t *testing.T) {
+func TestSessionLEDs_EmitsSceneRightColumn(t *testing.T) {
 	p := newTestSessionProject()
 	leds := sessionLEDs(p)
 
-	// All 8 top-row scene buttons must be present.
-	for col := 0; col < 8; col++ {
-		led := findLEDMsg(leds, 8, col, t)
+	// All 8 right-column "play all" buttons (col 8, rows 0-7) must be present.
+	for row := 0; row < 8; row++ {
+		led := findLEDMsg(leds, row, 8, t)
 		if !colorEqual(led, sessionSceneDim) {
-			t.Errorf("scene button col %d: expected sessionSceneDim, got %+v", col, led)
+			t.Errorf("scene button row %d: expected sessionSceneDim, got %+v", row, led)
 		}
 	}
 }

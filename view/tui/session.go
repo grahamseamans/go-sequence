@@ -244,10 +244,10 @@ func sessionDeviceLabel(kind model.DeviceKind) string {
 }
 
 // sessionRenderLaunchpadHelp renders the clip-launcher Launchpad reference.
-// Each cell at (row=track, col=pattern) is colored by the device's content
-// and schedule: playing > queued > has-content > empty. The right column
-// shows scene-launch buttons; the top row is unused. Mirrors the old
-// sequencer/session.go renderLaunchpadHelp(), but reads from the new model.
+// Each cell at (row=pattern, col=instrument) is colored by the device's
+// content and schedule: playing > queued > has-content > empty. The right
+// column shows the "play all" scene buttons (one per pattern row); the top
+// row is unused.
 func sessionRenderLaunchpadHelp(project *model.Project) string {
 	playingColor := [3]uint8{255, 255, 255}
 	queuedColor := [3]uint8{255, 200, 0}
@@ -256,25 +256,29 @@ func sessionRenderLaunchpadHelp(project *model.Project) string {
 	sceneColor := [3]uint8{148, 18, 126}
 	offColor := [3]uint8{30, 30, 30}
 
+	// Grid orientation matches the hardware: column = instrument/track, row =
+	// pattern (pattern 0 on top). grid[displayRow][displayCol] = grid[pattern][track].
 	var grid [8][8][3]uint8
 	var rightCol [8][3]uint8
 
-	for row := 0; row < 8; row++ {
-		track := project.Tracks[row]
-		playing, queued := sessionTrackSchedule(project, row)
-		mask := sessionContentMask(track)
-		for col := 0; col < 8; col++ {
+	for track := 0; track < 8; track++ {
+		playing, queued := sessionTrackSchedule(project, track)
+		mask := sessionContentMask(project.Tracks[track])
+		for pattern := 0; pattern < 8; pattern++ {
 			switch {
-			case col == playing:
-				grid[row][col] = playingColor
-			case col == queued && queued != playing:
-				grid[row][col] = queuedColor
-			case col < len(mask) && mask[col]:
-				grid[row][col] = clipColor
+			case pattern == playing:
+				grid[pattern][track] = playingColor
+			case pattern == queued && queued != playing:
+				grid[pattern][track] = queuedColor
+			case pattern < len(mask) && mask[pattern]:
+				grid[pattern][track] = clipColor
 			default:
-				grid[row][col] = emptyColor
+				grid[pattern][track] = emptyColor
 			}
 		}
+	}
+	// Right-column "play all" scene buttons — one per pattern row.
+	for row := 0; row < 8; row++ {
 		rightCol[row] = sceneColor
 	}
 

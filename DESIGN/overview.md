@@ -54,11 +54,12 @@ jobs. You change focus, the grid becomes that thing.
 
 ## Session — where you compose live
 
-The **Session** is the heart of live performance: an 8×8 grid where each row is a
-track and each column is a pattern slot. You queue patterns, launch columns as
-**scenes** (section changes), fire **one-shot** patterns as fills, drop parts by
-launching empty slots, and watch the transport tell you what's coming. This is how
-a song gets built from nothing in front of people. (See `session.md`.)
+The **Session** is the heart of live performance: an 8×8 grid where each column
+is an instrument and each row is a pattern. You queue patterns, fire whole
+pattern rows across all instruments as **scenes** via the right-column "play
+all" buttons, drop parts by launching empty slots, and watch the transport tell
+you what's coming. This is how a song gets built from nothing in front of
+people. (See `session.md`.)
 
 Silencing a track is the **mixer's** job, not the sequencer's — there's no
 track mute/solo here. (See `session.md`.)

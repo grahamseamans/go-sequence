@@ -9,15 +9,21 @@ track. You build a song by deciding what plays, when — in the moment.
 
 ## The grid
 
+**Columns are instruments, rows are patterns.** Left column = instrument 1,
+right column = instrument 8. Top row = pattern 1, bottom row = pattern 8. Same
+orientation on the Launchpad and in the TUI.
+
 ```
-            col 0   col 1   col 2  ...  col 7
- track 0  [  P0  ] [  P1  ] [ ... ]    [  P7  ]
- track 1  [  P0  ] [  P1  ] [ ... ]    [  P7  ]
-   ...
- track 7  [  P0  ] [  P1  ] [ ... ]    [  P7  ]
+            instr1  instr2  ...  instr8     │
+ pattern1  [      ][      ]    [      ]     ◀ play-all (scene)
+ pattern2  [      ][      ]    [      ]     ◀ play-all
+   ...                                       │  ← right-column
+ pattern8  [      ][      ]    [      ]     ◀ play-all     buttons
 ```
 
-Each cell is a pattern slot. Its color tells you its state at a glance:
+So top-left is instrument 1 / pattern 1; bottom-right is instrument 8 /
+pattern 8. Each cell is a pattern slot for one instrument; its color tells you
+its state at a glance:
 
 - **off** — empty slot, nothing recorded
 - **dim / blue** — has content, not playing
@@ -38,12 +44,12 @@ Changed your mind before it launches? **Tap the amber (queued) slot again** to
 cancel the queue. The current pattern just keeps looping as if you never touched
 it. Queuing is a toggle: tap to arm, tap again to call it off.
 
-## Scenes — launching a column across all tracks
+## Scenes — the "play all" row buttons
 
-A **scene** is one pattern column launched on every track at once. The grid has
-rows = tracks and columns = pattern slots, so column *c* is "slot *c* on all 8
-tracks." The **top row of round buttons** are the scene triggers: top button *c*
-queues column *c* across every track together.
+The **right-hand column of round buttons** is "play all" — one button per
+pattern *row*. Pressing the play-all button on a row cues **that pattern on all
+8 instruments at once**. Since rows are patterns, that's a **scene**: the whole
+band jumps to pattern 3 together.
 
 This is how you move between song sections — verse, chorus, drop, breakdown — in
 one gesture instead of stabbing eight pads and hoping they land on the same

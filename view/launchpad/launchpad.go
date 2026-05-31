@@ -71,17 +71,21 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		}
 
 	case model.FocusSession:
-		// Top row of round buttons (Row 8) are scene triggers: queue pattern-
-		// column ev.Col on ALL tracks at once. Press-only.
-		if ev.Row == 8 {
+		// Right column (Col 8) = "play all" scene buttons: cue the pattern on
+		// that row across every track at once. Press-only.
+		if ev.Col == 8 {
 			if ev.Down {
-				controller.QueueScene(project, ev.Col)
+				controller.QueueScene(project, sessionRowPattern(ev.Row))
 			}
 			return
 		}
-		// 8x8 grid: queue/un-queue a pattern on the row's track. The toggle,
-		// the per-track lock, and the dirty-mark all live in
-		// controller.ToggleQueue (via sessionPad), shared with the TUI.
+		// Top control row (Row 8) is unused in the session view.
+		if ev.Row == 8 {
+			return
+		}
+		// 8x8 grid: col = instrument, row = pattern. The toggle, the per-track
+		// lock, and the dirty-mark all live in controller.ToggleQueue (via
+		// sessionPad), shared with the TUI.
 		sessionPad(project, out, ev.Row, ev.Col, ev.Down)
 
 	case model.FocusSettings:

@@ -14,80 +14,81 @@ var (
 	sessionQueued     = LED{R: 255, G: 160, B: 0}
 	sessionHasContent = LED{R: 30, G: 30, B: 30}
 	sessionEmpty      = LED{R: 0, G: 0, B: 0}
-	// sessionSceneDim lights the top-row scene-trigger buttons so they read
-	// as "available" — a dim white, reusing the has-content brightness.
+	// sessionSceneDim lights the right-column "play all" scene buttons so they
+	// read as "available" — a dim white, reusing the has-content brightness.
 	sessionSceneDim = LED{R: 30, G: 30, B: 30}
 )
 
-// sessionTrackRow maps between a track index and its physical Launchpad row.
-// It's its own inverse: track 0 sits on the TOP row (physical row 7) and track
-// 7 on the bottom, matching the drum view (steps count from the top) and the
-// top-to-bottom track order everywhere else. hw.go puts physical row 0 at the
-// BOTTOM, so without this flip the session grid runs upside down.
-func sessionTrackRow(i int) int { return 7 - i }
+// Session grid orientation — same as the TUI and the physical hardware:
+//   - COLUMNS are instruments/tracks: col 0 = instrument 1 (left) ... col 7 =
+//     instrument 8 (right).
+//   - ROWS are patterns: pattern 1 on the TOP row ... pattern 8 on the bottom.
+//
+// hw.go puts physical row 0 at the BOTTOM, so a pattern p lives on physical
+// row (7 - p), and vice versa. The right-hand round buttons (col 8) are the
+// "play all" / scene launchers — one per pattern row.
 
-// sessionPad queues (or un-queues) a pattern on a track via the 8x8 session
-// grid. The physical row is flipped to a track index (top row = track 0); col
-// in [0,7] is the pattern slot. The queue/un-queue toggle + locking +
-// dirty-marking live in controller.ToggleQueue, shared with the TUI session
-// view.
+// sessionRowPattern converts between a physical grid row and a pattern index.
+// Self-inverse: pattern 0 (top) <-> physical row 7; pattern 7 <-> row 0.
+func sessionRowPattern(r int) int { return 7 - r }
+
+// sessionPad queues (or un-queues) the cell under a grid press: the column is
+// the instrument/track, the row is the pattern (pattern 1 on top). The
+// toggle + per-track lock + dirty-mark live in controller.ToggleQueue, shared
+// with the TUI session view.
 func sessionPad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
-	controller.ToggleQueue(project, sessionTrackRow(row), col)
+	controller.ToggleQueue(project, col, sessionRowPattern(row))
 }
 
-// sessionLEDs renders the 8x8 LED frame for the session view.
-//
-// Track 0 is the TOP row (physical row 7); each column is a pattern slot
-// within that track's 16 patterns (only the first 8 are shown on the pad grid
-// — patterns 8..15 aren't reachable from the pads).
+// sessionLEDs renders the session frame: the 8x8 grid (col = instrument, row =
+// pattern, pattern 1 on top) plus the 8 right-column "play all" scene buttons.
+// Only patterns 0..7 are reachable from the grid (patterns 8..15 aren't).
 //
 // Per-cell color priority: playing > queued > has-content > empty.
 func sessionLEDs(project *model.Project) []LED {
 	if project == nil {
 		return nil
 	}
-	leds := make([]LED, 0, 64)
-	for track := 0; track < 8; track++ {
-		row := sessionTrackRow(track)
-		t := project.Tracks[track]
-		if t == nil || t.Type == model.DeviceNone {
-			// Empty row: leave pads dark. Emitting explicit zero LEDs is
-			// load-bearing because SetLEDs rewrites the full frame each
-			// tick and anything not emitted keeps its old color.
-			for col := 0; col < 8; col++ {
-				leds = append(leds, LED{Row: row, Col: col, R: sessionEmpty.R, G: sessionEmpty.G, B: sessionEmpty.B})
-			}
-			continue
+	leds := make([]LED, 0, 72)
+	for col := 0; col < 8; col++ {
+		track := project.Tracks[col]
+		hasDevice := track != nil && track.Type != model.DeviceNone
+		var cursor model.Cursor
+		if hasDevice {
+			cursor = project.Playback.Cursors[col]
 		}
-		cursor := project.Playback.Cursors[track]
-		for col := 0; col < 8; col++ {
-			c := sessionCellColor(t, cursor, col)
+		for pattern := 0; pattern < 8; pattern++ {
+			row := sessionRowPattern(pattern)
+			c := sessionEmpty
+			if hasDevice {
+				c = sessionCellColor(track, cursor, pattern)
+			}
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
 	}
-	// Top-row scene-trigger buttons (Row 8, cols 0-7). Emitted every frame —
-	// SetLEDs rewrites the whole frame, so anything not emitted keeps its
-	// stale color. Dim white = "scene available."
-	for col := 0; col < 8; col++ {
-		leds = append(leds, LED{Row: 8, Col: col, R: sessionSceneDim.R, G: sessionSceneDim.G, B: sessionSceneDim.B})
+	// Right-column "play all" scene buttons (Col 8, rows 0-7), one per pattern
+	// row. Emitted every frame — SetLEDs rewrites the whole frame, so anything
+	// not emitted keeps its stale color. Dim white = "available".
+	for row := 0; row < 8; row++ {
+		leds = append(leds, LED{Row: row, Col: 8, R: sessionSceneDim.R, G: sessionSceneDim.G, B: sessionSceneDim.B})
 	}
 	return leds
 }
 
-// sessionCellColor picks the LED color for one cell of the session grid.
+// sessionCellColor picks the LED color for one (track, pattern) cell.
 // Precedence: playing > queued > has-content > empty. Tracks without a
 // device never reach this — caller filters them.
-func sessionCellColor(track *model.Track, cursor model.Cursor, col int) LED {
-	if cursor.CurrentPattern == col {
+func sessionCellColor(track *model.Track, cursor model.Cursor, pattern int) LED {
+	if cursor.CurrentPattern == pattern {
 		return sessionPlaying
 	}
-	if cursor.QueuedPattern == col {
+	if cursor.QueuedPattern == pattern {
 		return sessionQueued
 	}
-	if model.PatternHasContent(track, col) {
+	if model.PatternHasContent(track, pattern) {
 		return sessionHasContent
 	}
 	return sessionEmpty
