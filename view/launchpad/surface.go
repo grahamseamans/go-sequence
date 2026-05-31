@@ -10,7 +10,8 @@ type Surface interface {
 
 type PadEvent struct {
 	Row, Col int
-	Down     bool // true on press, false on release
+	Down     bool  // true on press, false on release
+	Velocity uint8 // NoteOn velocity on the 8x8 grid; 0 for releases and controls
 }
 
 type LED struct {

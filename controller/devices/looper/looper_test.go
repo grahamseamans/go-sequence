@@ -59,3 +59,52 @@ func TestDefaultLength(t *testing.T) {
 		t.Errorf("Expected length 1, got %d", compiled.Length)
 	}
 }
+
+func TestQuantizeSnapsToNearestGrid(t *testing.T) {
+	// QuantizeDiv=4 -> step = PPQ/4 = 240. An event at tick 250 should snap
+	// to 240 (nearest), and one at 360 should snap to 480.
+	step := int64(devices.PPQ / 4)
+	pat := &devices.LooperPattern{
+		Events: []devices.TimedEvent{
+			{Tick: 250, Event: midi.Event{Type: midi.NoteOn}},
+			{Tick: 360, Event: midi.Event{Type: midi.NoteOn}},
+		},
+		Length:      int64(devices.PPQ * 4),
+		Quantize:    true,
+		QuantizeDiv: 4,
+	}
+	compiled := looper.Compile(pat, 0)
+
+	if compiled.Events[0].Tick != step {
+		t.Errorf("expected 250 to snap to %d, got %d", step, compiled.Events[0].Tick)
+	}
+	if compiled.Events[1].Tick != 2*step {
+		t.Errorf("expected 360 to snap to %d, got %d", 2*step, compiled.Events[1].Tick)
+	}
+}
+
+func TestQuantizeOffPassesThrough(t *testing.T) {
+	pat := &devices.LooperPattern{
+		Events:      []devices.TimedEvent{{Tick: 250, Event: midi.Event{Type: midi.NoteOn}}},
+		Length:      int64(devices.PPQ * 4),
+		Quantize:    false,
+		QuantizeDiv: 4,
+	}
+	compiled := looper.Compile(pat, 0)
+	if compiled.Events[0].Tick != 250 {
+		t.Errorf("expected unchanged tick 250 when quantize off, got %d", compiled.Events[0].Tick)
+	}
+}
+
+func TestQuantizeNonDestructive(t *testing.T) {
+	pat := &devices.LooperPattern{
+		Events:      []devices.TimedEvent{{Tick: 250, Event: midi.Event{Type: midi.NoteOn}}},
+		Length:      int64(devices.PPQ * 4),
+		Quantize:    true,
+		QuantizeDiv: 4,
+	}
+	_ = looper.Compile(pat, 0)
+	if pat.Events[0].Tick != 250 {
+		t.Errorf("expected pat.Events untouched (250), got %d", pat.Events[0].Tick)
+	}
+}

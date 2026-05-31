@@ -26,6 +26,19 @@ func Compile(pat *devices.LooperPattern, seed uint64) devices.CompiledPattern {
 	events := make([]devices.TimedEvent, len(pat.Events))
 	copy(events, pat.Events)
 
+	// Compile-time quantize: snap each event onto a grid step via
+	// round-to-nearest. Non-destructive — we only mutate the copied slice,
+	// never pat.Events. When Quantize is off, events pass through unchanged.
+	if pat.Quantize && pat.QuantizeDiv > 0 {
+		step := int64(devices.PPQ / pat.QuantizeDiv)
+		if step > 0 {
+			for i := range events {
+				snapped := ((events[i].Tick + step/2) / step) * step
+				events[i].Tick = snapped % length
+			}
+		}
+	}
+
 	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].Tick < events[j].Tick
 	})

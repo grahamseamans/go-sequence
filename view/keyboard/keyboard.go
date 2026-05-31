@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"go-sequence/controller"
+	"go-sequence/controller/devices/looper"
 	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
@@ -110,7 +111,7 @@ func HandleMIDI(project *model.Project, out midi.ToExternal, trackIdx int, ev mi
 	case *devices.Drum:
 		drumMIDI(track, project, trackIdx, out, ev)
 	case *devices.Looper:
-		looperMIDI(track, project, trackIdx, out, ev)
+		looper.RecordOrPreview(track, project, trackIdx, out, ev)
 	}
 	track.Unlock()
 	controller.MarkTrackDirty(project, trackIdx)

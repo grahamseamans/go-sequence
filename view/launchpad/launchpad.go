@@ -56,12 +56,12 @@ func HandlePad(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		if track == nil {
 			return
 		}
-track.Lock()
+		track.Lock()
 		switch track.Device.(type) {
 		case *devices.Drum:
 			drumPad(track, project, out, ev.Row, ev.Col, ev.Down)
 		case *devices.Looper:
-			looperPad(track, project, out, ev.Row, ev.Col, ev.Down)
+			looperPad(track, project, out, ev)
 		default:
 			emptyPad(project, out, ev.Row, ev.Col, ev.Down)
 		}

@@ -84,7 +84,9 @@ func NewLaunchpad(id string, inPort drivers.In, outPort drivers.Out) (*Launchpad
 				}
 				down := velocity > 0
 				debug.Log("lp-in", "NoteOn note=%d vel=%d -> row=%d col=%d down=%v", note, velocity, row, col, down)
-				lp.sendPad(PadEvent{Row: row, Col: col, Down: down})
+				// Grid is velocity-sensitive; carry the press velocity through.
+				// A NoteOn with velocity 0 is a release, so it carries 0.
+				lp.sendPad(PadEvent{Row: row, Col: col, Down: down, Velocity: velocity})
 				return
 			}
 			if msg.GetNoteOff(&channel, &note, &velocity) {
