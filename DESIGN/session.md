@@ -38,14 +38,16 @@ Changed your mind before it launches? **Tap the amber (queued) slot again** to
 cancel the queue. The current pattern just keeps looping as if you never touched
 it. Queuing is a toggle: tap to arm, tap again to call it off.
 
-## Scenes — launching a whole row
+## Scenes — launching a column across all tracks
 
-Tap a **scene** trigger and the entire row launches at once — every track queues
-the pattern in that column together. This is how you move between song sections:
-verse, chorus, drop, breakdown. One gesture changes the whole arrangement instead
-of stabbing eight pads and hoping they land on the same boundary.
+A **scene** is one pattern column launched on every track at once. The grid has
+rows = tracks and columns = pattern slots, so column *c* is "slot *c* on all 8
+tracks." The **top row of round buttons** are the scene triggers: top button *c*
+queues column *c* across every track together.
 
-Scenes are the backbone of performing structure live.
+This is how you move between song sections — verse, chorus, drop, breakdown — in
+one gesture instead of stabbing eight pads and hoping they land on the same
+boundary. Scenes are the backbone of performing structure live.
 
 ## One-shots — fills and transitions
 
@@ -57,13 +59,21 @@ pattern can be a one-shot. Loop a drum groove, one-shot a one-bar fill over the
 top, and you're back in the groove automatically the next loop. No re-launching,
 no cleanup.
 
-## Mute / solo
+## Dropping and bringing back parts
 
-**Mute** or **solo** any track instantly, without touching its patterns. Pull the
-kick for a breakdown, solo the lead, bring everything back for the drop. It's
-non-destructive — the patterns keep running underneath; you're just deciding what
-the audience hears. This is the everyday tool of live dynamics: contrast, tension,
-release.
+There's no track mute/solo here — silencing a track is your **downstream mixer's**
+job, not the sequencer's. The MIDI brain decides *what plays*; your mixer decides
+*what you hear*. So live dynamics come from what you launch:
+
+- **Drop a part** by launching an **empty slot** on that track — it goes silent at
+  the next boundary, the rest keep going.
+- **Bring it back** by launching a pattern slot again.
+- **Sparse vs. full patterns** in different slots give you breakdown vs. drop —
+  launch the sparse one for tension, the full one for release.
+- **Scenes** swap the whole arrangement at once for section changes.
+
+(If you want to yank a part instantly without waiting for the boundary, that's a
+fader/mute on your mixer — which is exactly where it belongs.)
 
 ## Transport feedback
 
@@ -83,10 +93,13 @@ There's no timeline, so a performance is a path through these gestures:
    another. They lock together at the boundary.
 2. **Build the section** — focus a looper track, play a phrase into the grid,
    record it, overdub a harmony. Switch back to Session, layer it in.
-3. **Add tension** — bring in more tracks; hold parts back with mute.
+3. **Add tension** — bring in more tracks by launching their slots; hold parts
+   back by leaving their slots empty.
 4. **Section change** — fire a **scene** to move everyone to the chorus at once.
-5. **Transitions** — drop **one-shot** fills on the boundary.
-6. **Breakdown** — mute most tracks, let a single loop breathe, then build back.
-7. **Outro** — mute parts away one at a time, stop the transport when it's done.
+5. **Transitions** — drop a **one-shot** fill on the boundary.
+6. **Breakdown** — launch empty/sparse slots so a single loop breathes, then
+   launch the full patterns back in.
+7. **Outro** — launch parts down to empty one at a time, stop the transport when
+   it's done.
 
 The whole song is this, performed — never drawn.
