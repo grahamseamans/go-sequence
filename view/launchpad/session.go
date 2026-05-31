@@ -19,22 +19,30 @@ var (
 	sessionSceneDim = LED{R: 30, G: 30, B: 30}
 )
 
+// sessionTrackRow maps between a track index and its physical Launchpad row.
+// It's its own inverse: track 0 sits on the TOP row (physical row 7) and track
+// 7 on the bottom, matching the drum view (steps count from the top) and the
+// top-to-bottom track order everywhere else. hw.go puts physical row 0 at the
+// BOTTOM, so without this flip the session grid runs upside down.
+func sessionTrackRow(i int) int { return 7 - i }
+
 // sessionPad queues (or un-queues) a pattern on a track via the 8x8 session
-// grid. row in [0,7] is the track; col in [0,7] is the pattern slot. The
-// queue/un-queue toggle + locking + dirty-marking live in
-// controller.ToggleQueue, shared with the TUI session view.
+// grid. The physical row is flipped to a track index (top row = track 0); col
+// in [0,7] is the pattern slot. The queue/un-queue toggle + locking +
+// dirty-marking live in controller.ToggleQueue, shared with the TUI session
+// view.
 func sessionPad(project *model.Project, out midi.ToExternal, row, col int, down bool) {
 	if !down {
 		return
 	}
-	controller.ToggleQueue(project, row, col)
+	controller.ToggleQueue(project, sessionTrackRow(row), col)
 }
 
 // sessionLEDs renders the 8x8 LED frame for the session view.
 //
-// Each row is a track; each column is a pattern slot within that track's
-// 16 patterns (only the first 8 are shown on the pad grid — patterns 8..15
-// aren't reachable from the pads).
+// Track 0 is the TOP row (physical row 7); each column is a pattern slot
+// within that track's 16 patterns (only the first 8 are shown on the pad grid
+// — patterns 8..15 aren't reachable from the pads).
 //
 // Per-cell color priority: playing > queued > has-content > empty.
 func sessionLEDs(project *model.Project) []LED {
@@ -42,9 +50,10 @@ func sessionLEDs(project *model.Project) []LED {
 		return nil
 	}
 	leds := make([]LED, 0, 64)
-	for row := 0; row < 8; row++ {
-		track := project.Tracks[row]
-		if track == nil || track.Type == model.DeviceNone {
+	for track := 0; track < 8; track++ {
+		row := sessionTrackRow(track)
+		t := project.Tracks[track]
+		if t == nil || t.Type == model.DeviceNone {
 			// Empty row: leave pads dark. Emitting explicit zero LEDs is
 			// load-bearing because SetLEDs rewrites the full frame each
 			// tick and anything not emitted keeps its old color.
@@ -53,9 +62,9 @@ func sessionLEDs(project *model.Project) []LED {
 			}
 			continue
 		}
-		cursor := project.Playback.Cursors[row]
+		cursor := project.Playback.Cursors[track]
 		for col := 0; col < 8; col++ {
-			c := sessionCellColor(track, cursor, col)
+			c := sessionCellColor(t, cursor, col)
 			leds = append(leds, LED{Row: row, Col: col, R: c.R, G: c.G, B: c.B})
 		}
 	}

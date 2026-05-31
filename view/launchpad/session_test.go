@@ -33,14 +33,15 @@ func TestSessionPad_UnqueueToggle(t *testing.T) {
 	p := newTestSessionProject()
 	mock := &midi.MockToExternal{}
 
-	// Tap an unqueued slot -> queues it.
-	sessionPad(p, mock, 0, 3, true)
+	// Physical row 7 is the TOP row = track 0 (the grid is flipped so track 0
+	// sits on top). Tap an unqueued slot -> queues it.
+	sessionPad(p, mock, 7, 3, true)
 	if p.Playback.Cursors[0].QueuedPattern != 3 {
 		t.Fatalf("expected QueuedPattern 3 after first tap, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
 
 	// Tap the same (now-queued) slot again -> cancels the queue.
-	sessionPad(p, mock, 0, 3, true)
+	sessionPad(p, mock, 7, 3, true)
 	if p.Playback.Cursors[0].QueuedPattern != -1 {
 		t.Fatalf("expected QueuedPattern -1 after un-queue, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
@@ -50,14 +51,42 @@ func TestSessionPad_QueueDifferentReplaces(t *testing.T) {
 	p := newTestSessionProject()
 	mock := &midi.MockToExternal{}
 
-	sessionPad(p, mock, 0, 2, true)
+	sessionPad(p, mock, 7, 2, true) // row 7 = track 0
 	if p.Playback.Cursors[0].QueuedPattern != 2 {
 		t.Fatalf("expected QueuedPattern 2, got %d", p.Playback.Cursors[0].QueuedPattern)
 	}
 
-	sessionPad(p, mock, 0, 5, true)
+	sessionPad(p, mock, 7, 5, true)
 	if p.Playback.Cursors[0].QueuedPattern != 5 {
 		t.Fatalf("expected QueuedPattern 5 after queuing a different slot, got %d", p.Playback.Cursors[0].QueuedPattern)
+	}
+}
+
+func TestSessionPad_RowFlip_Track0OnTopRow(t *testing.T) {
+	p := newTestSessionProject()
+	mock := &midi.MockToExternal{}
+
+	// Top row (physical 7) must reach track 0.
+	sessionPad(p, mock, 7, 1, true)
+	if p.Playback.Cursors[0].QueuedPattern != 1 {
+		t.Errorf("top row (7) should queue track 0, got Cursors[0]=%d", p.Playback.Cursors[0].QueuedPattern)
+	}
+	// Bottom row (physical 0) maps to track 7 (no device here) -> untouched.
+	sessionPad(p, mock, 0, 1, true)
+	if p.Playback.Cursors[7].QueuedPattern != -1 {
+		t.Errorf("bottom row maps to track 7 (no device), should stay -1, got %d", p.Playback.Cursors[7].QueuedPattern)
+	}
+}
+
+func TestSessionLEDs_Track0RendersOnTopRow(t *testing.T) {
+	p := newTestSessionProject()
+	p.Playback.Cursors[0].CurrentPattern = 0 // track 0 has a playing cell
+	leds := sessionLEDs(p)
+
+	// Track 0's playing cell must land on physical row 7 (top), not row 0.
+	top := findLEDMsg(leds, 7, 0, t)
+	if !colorEqual(top, sessionPlaying) {
+		t.Errorf("track 0 playing cell should be on top row (7), got %+v", top)
 	}
 }
 
