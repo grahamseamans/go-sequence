@@ -1,6 +1,7 @@
 package launchpad
 
 import (
+	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -90,11 +91,13 @@ func drumPad(track *model.Track, project *model.Project, out midi.ToExternal, ro
 		// Preview: send this lane's drum note if Preview mode is armed.
 		if state.Preview {
 			kit := devices.GetKit(track.Kit)
-			_ = out.Send(track.PortName, track.Channel, midi.Event{
+			if err := out.Send(track.PortName, track.Channel, midi.Event{
 				Type:     midi.NoteOn,
 				Note:     kit.Notes[laneIdx],
 				Velocity: 100,
-			})
+			}); err != nil {
+				debug.Log("launchpad", "drum preview send to %q ch%d: %v", track.PortName, track.Channel, err)
+			}
 		}
 
 		// Record-while-playing: if recording and transport is running, toggle

@@ -1,6 +1,7 @@
 package keyboard
 
 import (
+	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -39,11 +40,13 @@ func drumMIDI(track *model.Track, project *model.Project, trackIdx int, out midi
 	// playing the physical drum keys on their controller and expects to
 	// hear exactly what they pressed.
 	if !state.Recording {
-		_ = out.Send(track.PortName, track.Channel, midi.Event{
+		if err := out.Send(track.PortName, track.Channel, midi.Event{
 			Type:     midi.NoteOn,
 			Note:     ev.Note,
 			Velocity: ev.Velocity,
-		})
+		}); err != nil {
+			debug.Log("keyboard", "drum preview send to %q ch%d: %v", track.PortName, track.Channel, err)
+		}
 		return
 	}
 

@@ -1,6 +1,7 @@
 package keyboard
 
 import (
+	"go-sequence/debug"
 	"go-sequence/midi"
 	"go-sequence/model"
 	"go-sequence/model/devices"
@@ -30,7 +31,9 @@ func looperMIDI(track *model.Track, project *model.Project, trackIdx int, out mi
 
 	// Not recording — preview straight through.
 	if !d.Recording {
-		_ = out.Send(track.PortName, track.Channel, ev)
+		if err := out.Send(track.PortName, track.Channel, ev); err != nil {
+			debug.Log("keyboard", "looper preview send to %q ch%d: %v", track.PortName, track.Channel, err)
+		}
 		return
 	}
 
