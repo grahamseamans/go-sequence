@@ -4,6 +4,12 @@ This file tracks the patterns the codebase has actually used over time —
 why each was tried, why each was dropped, and where to find the code that
 embodied it. Newest first.
 
+Doc split: **`DESIGN/`** is the UX spec — what the instrument is from the
+user's seat (what they see, what each control does). **`ARCHITECTURE/`** (here)
+is the mechanics — the patterns, the playback/compile engine, the surface
+plumbing. When they overlap, DESIGN says *what* the user experiences and
+ARCHITECTURE says *how* it's built.
+
 ## Pattern 2 — pure MVC, free functions, model owns all state (current)
 
 Status: live. First commit: `196e1bd` (refactor step 1, 2026-04-19).
@@ -21,7 +27,9 @@ Three layers, parallel paths per domain:
   Each captures input, mutates the model directly, calls
   `MarkTrackDirty` to wake the compiler.
 
-Source of truth: `DESIGN.md` at repo root.
+Source of truth for UX: the `DESIGN/` folder. (The old single-file
+`DESIGN.md` is preserved at `DESIGN/DESIGN.bak.md` — it predates this split
+and mixes UX with mechanics; don't treat it as current.)
 
 Why pure MVC: prior managers + device interfaces were doing two jobs
 each (state + behavior) and lock granularity was unclear. Splitting
