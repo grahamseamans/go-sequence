@@ -201,7 +201,11 @@ func dispatch(out midi.ToExternal, track *model.Track, ev devices.TimedEvent) {
 	if track == nil {
 		return
 	}
-	_ = out.Send(track.PortName, track.Channel, ev.Event)
+	if err := out.Send(track.PortName, track.Channel, ev.Event); err != nil {
+		// Throttled: a misconfigured/closed port fails on every dispatched
+		// event, and unthrottled logging here reintroduces MIDI lag.
+		debug.LogEvery(100, "playback", "send to %q ch%d: %v", track.PortName, track.Channel, err)
+	}
 }
 
 // handleWrap runs per-track bookkeeping when the cursor crosses a pattern
@@ -272,7 +276,7 @@ func trashSlot(track *model.Track, patternIdx, slot int) {
 //
 // Tick/LastGlobalTick start at -1 so the FIRST processTick call enters at
 // globalTick=0 with a (-1, 0] walk window that includes tick 0 (the downbeat).
-func Play(project *model.Project) {
+func Play(project *model.Project, lc midi.OutputLifecycle) {
 	now := time.Now()
 	project.Playback.T0Mu.Lock()
 	project.Playback.T0 = now
@@ -284,12 +288,29 @@ func Play(project *model.Project) {
 		c.T0Tick = 0
 		c.CurrentSlot = 0
 		c.QueuedPattern = -1
-		// CurrentPattern is preserved — playback resumes on the pattern
-		// the clip launcher had selected.
 	}
 	if project.Playback.Tempo.Load() <= 0 {
 		project.Playback.Tempo.Store(int64(project.Tempo))
 	}
+
+	// Open every configured output port. A failing port doesn't block play
+	// — the track will simply produce no output, giving the user a chance
+	// to fix the port assignment in settings.
+	seen := map[string]struct{}{}
+	for i := 0; i < 8; i++ {
+		track := project.Tracks[i]
+		if track == nil || track.Type == model.DeviceNone || track.PortName == "" {
+			continue
+		}
+		if _, ok := seen[track.PortName]; ok {
+			continue
+		}
+		seen[track.PortName] = struct{}{}
+		if err := lc.EnsureOutput(track.PortName); err != nil {
+			debug.Log("playback", "open output %q: %v", track.PortName, err)
+		}
+	}
+
 	project.Playback.Playing.Store(true)
 
 	for i := 0; i < 8; i++ {
@@ -303,9 +324,9 @@ func Play(project *model.Project) {
 	}
 }
 
-// Pause halts the transport. Cursors are preserved.
-func Pause(project *model.Project) {
+func Pause(project *model.Project, lc midi.OutputLifecycle) {
 	project.Playback.Playing.Store(false)
+	lc.CloseAllOutputs()
 }
 
 // SetTempo updates the playback tempo in BPM, clamped to [20, 300]. Re-

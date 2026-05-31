@@ -28,8 +28,8 @@ type tickMsg time.Time
 // Run starts the Bubbletea program and blocks until it exits. The context
 // is held by the Model so a cancellation from main propagates into the
 // program.
-func Run(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps, th *theme.Theme) error {
-	m := newModel(ctx, project, out, saveOps, th)
+func Run(ctx context.Context, project *model.Project, out midi.ToExternal, lifecycle midi.OutputLifecycle, saveOps save.SaveOps, th *theme.Theme) error {
+	m := newModel(ctx, project, out, lifecycle, saveOps, th)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -38,20 +38,22 @@ func Run(ctx context.Context, project *model.Project, out midi.ToExternal, saveO
 // Model is the Bubbletea Model for the TUI. Holds a pointer to the live
 // project — never a copy.
 type Model struct {
-	ctx     context.Context
-	project *model.Project
-	out     midi.ToExternal
-	saveOps save.SaveOps
-	theme   *theme.Theme
+	ctx       context.Context
+	project   *model.Project
+	out       midi.ToExternal
+	lifecycle midi.OutputLifecycle
+	saveOps   save.SaveOps
+	theme     *theme.Theme
 }
 
-func newModel(ctx context.Context, project *model.Project, out midi.ToExternal, saveOps save.SaveOps, th *theme.Theme) *Model {
+func newModel(ctx context.Context, project *model.Project, out midi.ToExternal, lifecycle midi.OutputLifecycle, saveOps save.SaveOps, th *theme.Theme) *Model {
 	return &Model{
-		ctx:     ctx,
-		project: project,
-		out:     out,
-		saveOps: saveOps,
-		theme:   th,
+		ctx:       ctx,
+		project:   project,
+		out:       out,
+		lifecycle: lifecycle,
+		saveOps:   saveOps,
+		theme:     th,
 	}
 }
 
@@ -75,7 +77,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key == "ctrl+c" || key == "q" {
 			return m, tea.Quit
 		}
-		HandleKey(m.project, m.out, m.saveOps, key)
+		HandleKey(m.project, m.out, m.lifecycle, m.saveOps, key)
 	case tickMsg:
 		return m, tea.Tick(33*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 	}
@@ -90,14 +92,14 @@ func (m *Model) View() string {
 // HandleKey dispatches one keystroke to the focused domain's handler.
 // Global hotkeys (transport, focus) are handled directly; everything else
 // routes to the focused device.
-func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps, key string) {
+func HandleKey(project *model.Project, out midi.ToExternal, lc midi.OutputLifecycle, saveOps save.SaveOps, key string) {
 	// Global hotkeys: never forwarded to devices.
 	switch key {
 	case " ", "space":
 		if controller.Playing(project) {
-			controller.Pause(project)
+			controller.Pause(project, lc)
 		} else {
-			controller.Play(project)
+			controller.Play(project, lc)
 		}
 		return
 	case "+", "=":
@@ -111,7 +113,12 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 		project.UI.Focus = model.FocusTarget{Kind: model.FocusTrack, Track: idx}
 		return
 	case ",":
-		project.UI.Focus.Kind = model.FocusSettings
+		// Toggle: , from settings exits to session; from elsewhere opens settings.
+		if project.UI.Focus.Kind == model.FocusSettings {
+			project.UI.Focus.Kind = model.FocusSession
+		} else {
+			project.UI.Focus.Kind = model.FocusSettings
+		}
 		return
 	case "S":
 		project.UI.Focus.Kind = model.FocusProject
@@ -173,7 +180,7 @@ func HandleKey(project *model.Project, out midi.ToExternal, saveOps save.SaveOps
 			// Project contents may have been replaced. Per DESIGN §4.5: stop
 			// playback and recompile every track's currently-playing pattern
 			// so playback has something to read on Play.
-			controller.Pause(project)
+			controller.Pause(project, lc)
 			controller.ResetCursors(project)
 			for i := 0; i < 8; i++ {
 				controller.MarkPlayingDirty(project, i)

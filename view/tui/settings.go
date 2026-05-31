@@ -73,6 +73,9 @@ func settingsKey(project *model.Project, out midi.ToExternal, focusedTrack int, 
 		return
 	case "enter", "return":
 		settingsOpenPopup(project, st)
+	case "esc":
+		project.UI.Focus.Kind = model.FocusSession
+		return
 	case "t":
 		track := project.Tracks[project.UI.Focus.Track]
 		if track != nil {
@@ -213,7 +216,7 @@ func settingsRender(project *model.Project, th *theme.Theme) string {
 
 	titleStyle := themeStyle(th, roleFG).Bold(true)
 	headerStyle := themeStyle(th, roleMuted)
-	cursorStyle := themeStyle(th, roleCursor)
+	cursorStyle := themeStyle(th, roleCursor).Bold(true)
 	mutedStyle := themeStyle(th, roleMuted)
 
 	var b strings.Builder
@@ -296,6 +299,7 @@ func settingsRender(project *model.Project, th *theme.Theme) string {
 				{Key: "h / l", Desc: "move cursor between columns"},
 				{Key: "j / k", Desc: "move cursor between tracks"},
 				{Key: "enter", Desc: "open picker for selected cell"},
+				{Key: "esc", Desc: "back to session"},
 			}},
 			{Title: "Quick edits", Keys: []widgets.KeyBinding{
 				{Key: "t / T", Desc: "cycle device type"},

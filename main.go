@@ -70,7 +70,7 @@ func main() {
 	go keyboard.RunRoutine(ctx, project, ports, ports)
 
 	// TUI blocks until the user quits (q / ctrl+c) or ctx is cancelled.
-	if err := tui.Run(ctx, project, ports, saveOps, th); err != nil {
+	if err := tui.Run(ctx, project, ports, ports, saveOps, th); err != nil {
 		fmt.Printf("tui: %v\n", err)
 		os.Exit(1)
 	}
