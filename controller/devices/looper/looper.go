@@ -3,7 +3,6 @@ package looper
 import (
 	"sort"
 
-	"go-sequence/controller/devices/rng"
 	"go-sequence/model/devices"
 )
 
@@ -11,9 +10,10 @@ import (
 // For the looper, compilation is trivial: wrap the recorded events
 // in a CompiledPattern with the pattern's length. Pure: no I/O, no
 // mutation of spec, no globals.
+//
+// seed is unused today; kept in the signature so probability/humanize can
+// be added without churning every call site.
 func Compile(pat *devices.LooperPattern, seed uint64) devices.CompiledPattern {
-	_ = rng.NewRng(seed)
-
 	if pat == nil {
 		return devices.CompiledPattern{Length: 1}
 	}

@@ -3,7 +3,6 @@ package drum
 import (
 	"sort"
 
-	"go-sequence/controller/devices/rng"
 	"go-sequence/midi"
 	"go-sequence/model/devices"
 )
@@ -29,13 +28,11 @@ const noteDurationTicks int64 = 60
 // Signature diverges from DESIGN.md §5.4: Compile takes an explicit
 // `kit devices.Kit` because the kit lives on the Track, not on the Drum
 // spec.
+//
+// seed is unused today; kept in the signature so probability/humanize can
+// be added without churning every call site. TODO(probability): build an
+// rng from seed when per-step probability lands.
 func Compile(pat *devices.DrumPattern, kit devices.Kit, seed uint64) devices.CompiledPattern {
-	// Rng is built for future use (probability, humanize). Drum currently has
-	// no random behavior; keep the seed plumbing in place so probability can
-	// be added without changing the signature.
-	// TODO(probability): use r when per-step probability lands.
-	_ = rng.NewRng(seed)
-
 	if pat == nil {
 		return devices.CompiledPattern{Length: 1}
 	}
