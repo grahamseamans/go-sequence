@@ -2,7 +2,15 @@
 
 MIDI sequencer/arranger. Not a DAW. A MIDI brain.
 
-## Status
+## ☠️ DEAD PROJECT (2026-06-02)
+
+This project is deprecated. It should have just been a few Ableton scripts this whole time.
+
+Almost everything here — session view, scenes, clip launching, the looper, pattern state, the endless grid-orientation and save-vs-runtime-state wrangling — is stuff Ableton Live already does. Reimplementing a DAW's guts in Go to drive MIDI was the wrong altitude. The thing to build is a thin layer on top of Live (a Control Surface script, or driving Live over OSC), not a parallel DAW underneath it.
+
+Kept around for reference only. No further development. New work happens in a fresh repo targeting Ableton.
+
+## Status (ded)
 
 Working: Drum sequencer (16 sounds, 32 steps, variable length), looper (record/playback MIDI input), clip launcher, Launchpad X with LED feedback. Track-based architecture with per-track MIDI channels.
 
